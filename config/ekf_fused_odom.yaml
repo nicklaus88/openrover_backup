@@ -1,0 +1,107 @@
+# Fused odom -> base_footprint for odom_source:=fused.
+#
+# Used by launch/localization.py. This is the third odometry source, and the
+# reason it exists is that the other two fail in opposite conditions:
+#
+#   odom_source:=rover   commanded throttle integrated open-loop. Always
+#                        available, never degenerate -- but drifts on wheel
+#                        slip, battery sag and acceleration ramp, and is
+#                        blind to the rover being pushed.
+#
+#   odom_source:=rf2o    planar scan matching. Grounded in what the lidar
+#                        actually sees, so slip does not fool it -- but it
+#                        degenerates in a featureless corridor, which is
+#                        exactly what RoboPI_DryLab_corridor is.
+#
+# This EKF runs both at once, so scan matching corrects the slip while the
+# commanded velocity carries the estimate through the corridor.
+#
+# EXACTLY ONE NODE MAY PUBLISH odom -> base_footprint. When this file is in
+# use, launch/localization.py forces rf2o's publish_tf to false and does not
+# start odom_tf_broadcaster. Two publishers of one edge make TF alternate
+# between them and AMCL jitter.
+
+ekf_filter_node:
+  ros__parameters:
+
+    frequency: 30.0
+    # The filter predicts between measurements, so this does not need to
+    # track either input's rate (rf2o runs at ~7 Hz, the rover's odometry
+    # at ~50 Hz).
+    sensor_timeout: 0.2
+
+    # Planar base. Zeroes z, roll and pitch rather than letting a 2D lidar
+    # and an open-loop integrator argue about them.
+    two_d_mode: true
+    publish_tf: true
+
+    odom_frame: odom
+    # base_footprint, NOT base_link. Must match amcl_params.yaml's
+    # base_frame_id and rf2o's base_frame_id -- a mismatch is not a warning,
+    # the transform simply never resolves.
+    base_link_frame: base_footprint
+    world_frame: odom
+
+    # --- Source 1: velocity integrated from the commanded throttle --------
+    # TWIST ONLY. The pose in this message is open-loop dead reckoning whose
+    # error is unbounded; only the instantaneous velocity carries
+    # information. BaseDriver scales throttle to m/s with its k_x / k_y
+    # params and reports a speed-scaled covariance, so a stationary rover
+    # publishes a near-zero-variance zero twist -- the zero-velocity update
+    # that keeps the filter from integrating scan-match jitter while parked.
+    odom0: /rover/base/odometry
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,   # vx, vy       <- commanded throttle
+                   false, false, true,    # vyaw         <- flight-controller gyro
+                   false, false, false]
+    odom0_differential: false
+
+    # --- Source 2: rf2o scan matching -------------------------------------
+    # POSE ONLY, and differentially. differential:true makes the filter
+    # consume pose DELTAS rather than an absolute pose, which is the right
+    # semantics for an odometry source and stops the two sources fighting
+    # over where the origin is.
+    #
+    # rf2o's twist is deliberately not fused: twist.linear.y is hardcoded to
+    # 0.0 upstream and this base strafes, so fusing it would actively cancel
+    # every sideways move. Its pose does carry y, which is what makes this
+    # work.
+    odom1: /odom_rf2o
+    odom1_config: [true,  true,  false,
+                   false, false, true,    # x, y, yaw
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: true
+    # NO rejection gate on rf2o (odom1_pose_rejection_threshold unset =
+    # accept everything). It used to be 3.0, and that threw away TURNS:
+    # nothing else here measures yaw, so the filter predicts zero yaw rate
+    # and every rf2o rotation delta during a real turn looks like an
+    # outlier. Replayed through this node (2026-09-24), a 90 deg/s in-place
+    # turn moved rf2o 360 deg and the fused heading ~4 deg -- the robot in
+    # rviz simply did not turn. Gates of 6 / 10 / 20 all still lagged or
+    # dropped fast turns; only removing it tracked (350 of 360 deg).
+    #
+    # A gate is only safe once something PREDICTS the turn -- the gyro
+    # below. With gyro yaw rate fused, 3.0 tracked the same turn to 355 deg.
+    # Re-add it then, not before.
+
+    # --- Gyro yaw rate (odom0 vyaw, enabled 2026-09-24) ----------------------
+    # BaseDriver copies the flight controller's gyro Z into odom0's
+    # twist.angular.z with a real covariance (gyro_sigma). This is what
+    # lets the filter PREDICT a turn instead of discovering it scan by scan.
+    #
+    # Verified on the robot before enabling (scripts/odom_diagnose.py): the
+    # raw gyro was REVERSED and ~16x too large (raw sensor counts, not
+    # deg/s) -- slope -14.4 vs rf2o. BaseDriver now applies gyro_z_sign -1
+    # and gyro_scale 1/16.4, which maps that run to slope +0.88. Re-run the
+    # diagnose script after any flight-controller change; its section 2b
+    # must still read "agree".
+    #
+    # With the gyro predicting turns, odom1_pose_rejection_threshold: 3.0
+    # tracked a simulated 90 deg/s turn to 355/360 deg. Re-add it once a
+    # drive confirms fused heading still follows rf2o with it on.
+    #
+    # /rover/base/imu itself stays unfused: empty frame_id, all-zero
+    # covariances, and a whole-degree heading with no magnetometer.

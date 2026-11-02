@@ -1,0 +1,145 @@
+--- a/launch/perception_oakd.py
++++ b/launch/perception_oakd.py
+@@ -33,8 +33,8 @@
+ config/side_cameras.yaml for why they are by-path symlinks):
+ 
+     ros2 launch launch/perception_oakd.py \
+-        left_camera_device:=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.4.3:1.0-video-index0 \
+-        right_camera_device:=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.4.1:1.0-video-index0
++        left_camera_device:=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.1.3:1.0-video-index0 \
++        right_camera_device:=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.1.1:1.0-video-index0
+ """
+ 
+ import os
+@@ -50,12 +50,20 @@
+ )
+ from launch.conditions import IfCondition
+ from launch.launch_description_sources import PythonLaunchDescriptionSource
+-from launch.substitutions import LaunchConfiguration
++from launch.substitutions import Command, LaunchConfiguration
+ from launch_ros.actions import Node
++from launch_ros.parameter_descriptions import ParameterValue
+ 
+-HOME = Path(__file__).parent.parent
++# resolve(), not a bare parent chain: `ros2 launch launch/perception_oakd.py`
++# sets __file__ to the RELATIVE path typed, and XACRO below is handed to a
++# subprocess. Same reasoning as localization.py's abspath().
++HOME = Path(__file__).resolve().parent.parent
+ VAR = HOME / "var"
+ 
++# The robot's frames, measured. Shared with localization.py and mapping.py
++# so all three publish an identical tree -- see laser_tf below.
++XACRO = str(HOME / "description" / "open_rover.urdf.xacro")
++
+ # perception.py does a bare rmtree(VAR) here, which raises if var/ is
+ # missing (e.g. a fresh clone). Same intent, without that failure mode.
+ rmtree(VAR, ignore_errors=True)
+@@ -85,10 +93,14 @@
+ )
+ 
+ nodes = [
++    # use_base:=false when rover.py or perception.py already owns the
++    # base: two base nodes fight over the flight controller's serial port.
++    # Teleop goes with it, since it only drives that base.
+     Node(
+         package="rover",
+         executable="base",
+         namespace="rover",
++        condition=IfCondition(LaunchConfiguration("use_base")),
+         parameters=[
+             {"vid": "x0483"},
+             {"pid": "x5740"},
+@@ -134,6 +146,7 @@
+     Node(
+         package="camera_detection",
+         executable="operation",
++        condition=IfCondition(LaunchConfiguration("use_base")),
+     ),
+ ]
+ 
+@@ -200,25 +213,34 @@
+ #
+ # on repeat -- meaning obstacle avoidance is off while the rover drives.
+ #
+-# Values and positional argument order match launch/localization.py's
+-# laser_mount_tf deliberately, and the child frame is lidar_frame_id
+-# rather than a second literal "laser" so the two cannot drift apart.
+-# Two publishers of one static transform is NOT harmless (tf2 takes
+-# whichever arrived last), so pass use_laser_tf:=false when running
+-# localization.py, which publishes this same transform itself.
++# This used to be a static_transform_publisher parenting laser directly to
++# base_footprint, with laser_x/y/z/yaw arguments defaulting to 0.2 m
++# forward. localization.py and mapping.py had already moved to the URDF,
++# which reaches laser via base_footprint -> base_link -> laser at the
++# measured 0.127 m. Running this file next to either of them therefore gave
++# laser TWO parents: tf2 flips between them on every update, AMCL and rf2o
++# see the lidar jump ~73 mm, and on odom_source:=fused the EKF fuses that
++# jitter as motion.
++#
++# Now it publishes the same URDF, so the trees are identical. Two
++# robot_state_publishers with identical content are harmless, but it is
++# still one redundant node -- pass use_laser_tf:=false alongside
++# mapping.py. (localization.py no longer publishes any frames; it relies
++# on this one, via robot_start.py.) The distinct node name keeps the two
++# from colliding if you forget.
++#
++# lidar_frame_id must stay "laser" while this is on: that is the frame
++# the URDF defines, and any other name leaves the scan with no transform.
+ laser_tf = Node(
+-    package="tf2_ros",
+-    executable="static_transform_publisher",
+-    name="laser_mount_tf",
++    package="robot_state_publisher",
++    executable="robot_state_publisher",
++    name="robot_state_publisher_perception",
++    output="screen",
+     condition=IfCondition(LaunchConfiguration("use_laser_tf")),
+-    arguments=[
+-        LaunchConfiguration("laser_x"),
+-        LaunchConfiguration("laser_y"),
+-        LaunchConfiguration("laser_z"),
+-        LaunchConfiguration("laser_yaw"),
+-        "0", "0",
+-        "base_footprint", LaunchConfiguration("lidar_frame_id"),
+-    ],
++    parameters=[{
++        "robot_description": ParameterValue(
++            Command(["xacro ", XACRO]), value_type=str),
++    }],
+ )
+ 
+ args = [
+@@ -230,23 +252,17 @@
+         "camera_topic", default_value="/oak/rgb/image_raw",
+         description="RGB stream the relay republishes"),
+     DeclareLaunchArgument(
+-        "use_laser_tf", default_value="true",
+-        description="Publish base_footprint -> <lidar_frame_id>. Set false "
+-                    "when localization.py is running -- it publishes the "
+-                    "same transform"),
+-    DeclareLaunchArgument(
+-        "laser_x", default_value="0.2",
+-        description="Lidar mount offset, metres forward of base_footprint"),
+-    DeclareLaunchArgument(
+-        "laser_y", default_value="0.0",
+-        description="Lidar mount offset, metres left of base_footprint"),
++        "use_base", default_value="true",
++        description="Start the rover base node and teleop bridge. Set "
++                    "false when rover.py / perception.py already has it"),
+     DeclareLaunchArgument(
+-        "laser_z", default_value="0.1",
+-        description="Lidar mount height above base_footprint, metres"),
+-    DeclareLaunchArgument(
+-        "laser_yaw", default_value="3.14159265",
+-        description="Lidar yaw relative to base_footprint, radians "
+-                    "(pi = mounted facing backwards)"),
++        "use_laser_tf", default_value="true",
++        description="Publish the robot's frames (incl. base_footprint -> "
++                    "laser) from description/open_rover.urdf.xacro. Set "
++                    "false when mapping.py is running -- it publishes the "
++                    "same tree"),
++    # laser_x/y/z/yaw are gone: the mount comes from the URDF now. See
++    # laser_tf above.
+     DeclareLaunchArgument(
+         "use_rgb_relay", default_value="false",
+         description="Also republish the RGB stream as /capture/camera_0/img "

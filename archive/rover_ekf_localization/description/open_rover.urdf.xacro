@@ -1,0 +1,199 @@
+<?xml version="1.0"?>
+<!--
+  OpenRover URDF
+  ==============
+  Conventions (REP-103 / REP-105):
+    x forward, y left, z up, yaw CCW-positive seen from above.
+    base_footprint : centroid of the robot projected onto the floor
+    base_link      : same x/y as base_footprint, at wheel-axle height
+                     (the center of rotation for the mecanum base)
+
+  All measurements below are entered in INCHES (as measured) and converted
+  to meters with ${inch}. Heights are measured from the FLOOR (bottom of wheel)
+  so they can be read straight off a tape measure; the joints subtract the
+  axle height automatically.
+
+  Values marked ASSUMED or VERIFY were not in the measurement list.
+  None of the ASSUMED values affect 2D localization (lidar x/y/yaw and IMU
+  orientation are what matter), but please fill them in when you can.
+-->
+<robot name="open_rover" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ============================ Units ============================ -->
+  <xacro:property name="inch"  value="0.0254"/>
+  <xacro:property name="deg" value="${pi/180.0}"/>
+
+  <!-- ======================== Base geometry ======================== -->
+  <xacro:property name="wheel_diameter" value="${4.0*inch}"/>
+  <xacro:property name="wheel_radius"   value="${wheel_diameter/2}"/>
+  <xacro:property name="wheel_width"    value="${2.0*inch}"/>
+  <!-- Holonomic (omni-directional) base. Wheels are drawn parallel to the body
+       sides; set to 45 deg (pi/4) only if the omni wheels are mounted diagonally (X-drive). -->
+  <xacro:property name="wheel_yaw"      value="0.0"/>
+
+  <xacro:property name="robot_length" value="${15.0*inch}"/>  <!-- outer front wheel to outer rear wheel -->
+  <xacro:property name="robot_width"  value="${13.0*inch}"/>  <!-- outer face L wheel to outer face R wheel -->
+
+  <xacro:property name="front_edge_x" value="${ robot_length/2}"/>
+  <xacro:property name="rear_edge_x"  value="${-robot_length/2}"/>
+
+  <xacro:property name="wheel_x" value="${robot_length/2 - wheel_radius}"/>
+  <xacro:property name="wheel_y" value="${robot_width/2 - wheel_width/2}"/>
+  <xacro:property name="axle_z"  value="${wheel_radius}"/>
+
+  <xacro:property name="base_plate_z" value="${2.25*inch}"/>  <!-- floor to bottom of base plate -->
+  <xacro:property name="top_plate_z"  value="${4.75*inch}"/>  <!-- floor to top of top plate -->
+
+  <!-- Chassis box (visual only) -->
+  <xacro:property name="chassis_length" value="${2*wheel_x}"/>                          <!-- ASSUMED -->
+  <xacro:property name="chassis_width"  value="${robot_width - 2*wheel_width - 0.5*inch}"/> <!-- ASSUMED -->
+  <xacro:property name="chassis_height" value="${top_plate_z - base_plate_z}"/>
+
+  <!-- ============================ Lidar ============================ -->
+  <!-- Center of lidar 2.5 in behind the front edge of the front wheels -->
+  <xacro:property name="lidar_x"     value="${front_edge_x - 2.5*inch}"/>
+  <xacro:property name="lidar_y"     value="0.0"/>                          <!-- ASSUMED: on centerline -->
+  <xacro:property name="lidar_top_z" value="${(7.0 + 2.0/16.0)*inch}"/>
+  <xacro:property name="lidar_body_h" value="${1.0*inch}"/>
+  <xacro:property name="lidar_body_d" value="${2.75*inch}"/>
+  <!-- Scan plane assumed at mid-height of the body -->
+  <xacro:property name="lidar_z"     value="${lidar_top_z - lidar_body_h/2}"/> <!-- ASSUMED -->
+  <!-- VERIFY with the "box in front of the robot" test in RViz.
+       pi matches the 180 deg roll that scan_transformer currently applies;
+       use this ONLY after removing that roll from scan_transformer. -->
+  <xacro:property name="lidar_yaw"   value="${pi}"/>
+
+  <!-- ============================ OAK-D ============================ -->
+  <xacro:property name="oak_x"     value="${front_edge_x - 4.25*inch}"/>
+  <xacro:property name="oak_y"     value="0.0"/>                    <!-- ASSUMED: on centerline -->
+  <xacro:property name="oak_z"     value="${top_plate_z + 0.75*inch}"/> <!-- ASSUMED: needs measuring -->
+  <!-- 6 deg UP. In ROS, positive pitch tilts x downward, so up is negative. -->
+  <xacro:property name="oak_pitch" value="${-6.0*deg}"/>
+
+  <!-- ======================= Flight controller ===================== -->
+  <xacro:property name="fc_x"   value="${rear_edge_x + 2.5*inch}"/>
+  <xacro:property name="fc_y"   value="0.0"/>                       <!-- on centerline -->
+  <xacro:property name="fc_z"   value="${top_plate_z + 0.25*inch}"/>  <!-- ASSUMED: needs measuring -->
+  <xacro:property name="fc_yaw" value="0.0"/>                       <!-- arrow points +x (forward) -->
+
+  <!-- ==================== Blue Robotics side cams ================== -->
+  <xacro:property name="side_cam_x" value="0.0"/>                   <!-- ASSUMED: needs measuring -->
+  <xacro:property name="side_cam_y" value="${chassis_width/2}"/>    <!-- ASSUMED: at chassis edge -->
+  <xacro:property name="side_cam_z" value="${(base_plate_z + top_plate_z)/2}"/> <!-- ASSUMED -->
+  <!-- ASSUMED: each camera looks straight outward (left = +90 deg, right = -90 deg) -->
+
+  <!-- ========================== Materials ========================== -->
+  <material name="dark">  <color rgba="0.15 0.15 0.15 1.0"/></material>
+  <material name="grey">  <color rgba="0.55 0.55 0.55 1.0"/></material>
+  <material name="blue">  <color rgba="0.10 0.35 0.80 1.0"/></material>
+  <material name="orange"><color rgba="0.95 0.50 0.10 1.0"/></material>
+
+  <!-- ============================ Links ============================ -->
+  <link name="base_footprint"/>
+
+  <link name="base_link">
+    <visual>
+      <!-- chassis box sits between the plates; base_link is at axle height -->
+      <origin xyz="0 0 ${(base_plate_z + top_plate_z)/2 - axle_z}" rpy="0 0 0"/>
+      <geometry><box size="${chassis_length} ${chassis_width} ${chassis_height}"/></geometry>
+      <material name="grey"/>
+    </visual>
+  </link>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child  link="base_link"/>
+    <origin xyz="0 0 ${axle_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Wheels: fixed joints, since there are no encoders / joint states.
+       (Continuous joints would need a joint_state_publisher to appear in TF.) -->
+  <xacro:macro name="wheel" params="name x y yaw">
+    <link name="${name}_wheel">
+      <visual>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="dark"/>
+      </visual>
+    </link>
+    <joint name="${name}_wheel_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="${name}_wheel"/>
+      <origin xyz="${x} ${y} 0" rpy="0 0 ${yaw}"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel name="front_left"  x="${ wheel_x}" y="${ wheel_y}" yaw="${-wheel_yaw}"/>
+  <xacro:wheel name="front_right" x="${ wheel_x}" y="${-wheel_y}" yaw="${ wheel_yaw}"/>
+  <xacro:wheel name="rear_left"   x="${-wheel_x}" y="${ wheel_y}" yaw="${ wheel_yaw}"/>
+  <xacro:wheel name="rear_right"  x="${-wheel_x}" y="${-wheel_y}" yaw="${-wheel_yaw}"/>
+
+  <!-- Lidar. Frame name "laser" matches sllidar_ros2's frame_id. -->
+  <link name="laser">
+    <visual>
+      <!-- frame origin is the assumed scan plane at mid-body -->
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="${lidar_body_d/2}" length="${lidar_body_h}"/></geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="laser"/>
+    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z - axle_z}" rpy="0 0 ${lidar_yaw}"/>
+  </joint>
+
+  <!-- IMU (flight controller). BaseDriver must stamp its Imu msgs with this frame. -->
+  <link name="imu_link">
+    <visual>
+      <geometry><box size="${1.4*inch} ${1.4*inch} ${0.3*inch}"/></geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="imu_link"/>
+    <origin xyz="${fc_x} ${fc_y} ${fc_z - axle_z}" rpy="0 0 ${fc_yaw}"/>
+  </joint>
+
+  <!-- OAK-D mount point. Point the depthai-ros driver's parent frame at "oak_link";
+       the driver publishes its own sensor / optical frames under it. -->
+  <link name="oak_link">
+    <visual>
+      <geometry><box size="${1.2*inch} ${4.3*inch} ${1.0*inch}"/></geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+  <joint name="oak_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="oak_link"/>
+    <origin xyz="${oak_x} ${oak_y} ${oak_z - axle_z}" rpy="0 ${oak_pitch} 0"/>
+  </joint>
+
+  <!-- Blue Robotics side cameras, each with a ROS optical frame
+       (z forward, x right, y down) for image topics. -->
+  <xacro:macro name="side_camera" params="name y yaw">
+    <link name="${name}_camera_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 ${pi/2} 0"/>
+        <geometry><cylinder radius="${0.6*inch}" length="${0.8*inch}"/></geometry>
+        <material name="orange"/>
+      </visual>
+    </link>
+    <joint name="${name}_camera_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="${name}_camera_link"/>
+      <origin xyz="${side_cam_x} ${y} ${side_cam_z - axle_z}" rpy="0 0 ${yaw}"/>
+    </joint>
+    <link name="${name}_camera_optical_frame"/>
+    <joint name="${name}_camera_optical_joint" type="fixed">
+      <parent link="${name}_camera_link"/>
+      <child  link="${name}_camera_optical_frame"/>
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:side_camera name="left"  y="${ side_cam_y}" yaw="${ pi/2}"/>
+  <xacro:side_camera name="right" y="${-side_cam_y}" yaw="${-pi/2}"/>
+
+</robot>

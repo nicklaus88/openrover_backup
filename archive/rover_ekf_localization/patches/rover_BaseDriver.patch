@@ -1,0 +1,207 @@
+diff --git a/src/rover/include/BaseDriver.h b/src/rover/include/BaseDriver.h
+index 0bd6543..088740b 100644
+--- a/src/rover/include/BaseDriver.h
++++ b/src/rover/include/BaseDriver.h
+@@ -38,8 +38,23 @@ private:
+   void update(MSP::RAW_IMU data, time_point timestamp);
+   void update(MSP::ATTITUDE data, time_point timestamp);
+ 
+-  // Linear velocity normalization factor (m/s)
+-  double odom_k_linear;
++  // Throttle [-1,1] -> m/s normalization, one factor per axis. A mecanum
++  // base loses far more to roller slip when strafing than when driving
++  // forward, so a single gain cannot describe both.
++  double odom_k_x, odom_k_y;
++  // Twist covariance model: var = (slip_frac * v)^2 + sigma_floor^2.
++  // At rest this collapses to sigma_floor^2, which is the zero-velocity
++  // update -- the strongest statement available on a base with no encoders.
++  double odom_slip_frac_x, odom_slip_frac_y, odom_sigma_floor;
++  // Gyro yaw rate as published in odom twist.angular.z. The sign maps the
++  // flight controller's gyro Z onto REP-103 (CCW positive) and is
++  // UNVERIFIED -- scripts/odom_diagnose.py measures it against rf2o.
++  double odom_gyro_z_sign, odom_gyro_sigma;
++  // deg/s per raw MSP gyro unit (see the gyro_scale parameter).
++  double gyro_scale;
++  void set_twist_covariance();
++  // Decimates the 10 ms command timer down to the odometry publish rate.
++  uint8_t odom_publish_tick = 0;
+   double odom_initial_heading = NAN;
+   double odom_last_heading = NAN;
+   void integrate_odometry();
+diff --git a/src/rover/src/BaseDriver.cpp b/src/rover/src/BaseDriver.cpp
+index 10f1933..9d73577 100644
+--- a/src/rover/src/BaseDriver.cpp
++++ b/src/rover/src/BaseDriver.cpp
+@@ -44,8 +44,18 @@ void BaseDriver::motion(double vx, double vy, double vr) {
+   if (halted)
+     return;
+   integrate_odometry();
+-  odom_out.twist.twist.linear.x = vx * odom_k_linear;
+-  odom_out.twist.twist.linear.y = vy * odom_k_linear;
++  // clamp() RETURNS its result and does not mutate its argument, so the
++  // three bare clamp(vx, ...) statements below are no-ops and vx/vy/vr
++  // reach the mixer unclamped. The motor output stays bounded regardless
++  // (the comb_limit renormalisation caps |v[i]| at 2, so DSHOT stays in
++  // [1298, 1700]), so that is left alone here -- changing it would change
++  // how the base responds to an out-of-range command.
++  //
++  // The odometry must not inherit the bug though: without this, a command
++  // of vx = 3.0 would be reported as 3.84 m/s while the wheels turn at the
++  // same rate as vx = 1.0, and the EKF would fuse the lie.
++  odom_out.twist.twist.linear.x = clamp(vx, -1.0, 1.0) * odom_k_x;
++  odom_out.twist.twist.linear.y = clamp(vy, -1.0, 1.0) * odom_k_y;
+   // odom_out();
+   MSP::SET_MOTOR command;
+   clamp(vx, -1.0, 1.0);
+@@ -98,11 +108,18 @@ void BaseDriver::update(MSP::RAW_IMU data,
+   msg.linear_acceleration.x = data.accX * g;
+   msg.linear_acceleration.y = data.accY * g;
+   msg.linear_acceleration.z = data.accZ * g;
+-  static const double r = 3.1415926 / 180.0;
++  // Raw MSP gyro units -> rad/s. The raw values are NOT deg/s on this
++  // flight controller, though this code used to assume so: measured
++  // against rf2o on 2026-09-24 they read ~14-16x too high, i.e. raw
++  // sensor counts at 16.4 LSB per deg/s (the +-2000 dps range).
++  const double r = gyro_scale * 3.1415926 / 180.0;
+   msg.angular_velocity.x = data.gyrX * r;
+   msg.angular_velocity.y = data.gyrY * r;
+   msg.angular_velocity.z = data.gyrZ * r;
+   odom_out.twist.twist.angular = msg.angular_velocity;
++  // Only z reaches the EKF (vyaw). The sign is applied here, in the
++  // odometry only: /rover/base/imu keeps the raw flight-controller sign.
++  odom_out.twist.twist.angular.z = odom_gyro_z_sign * data.gyrZ * r;
+   SET_ROS_STAMP(msg, timestamp);
+   imu_status.acc_updated = true;
+   if (imu_status.updated()) {
+@@ -138,9 +155,27 @@ void BaseDriver::update(MSP::ATTITUDE data,
+   }
+ }
+ 
++// Speed-scaled twist covariance, written into the two entries the EKF
++// actually reads: [0] = vx, [7] = vy of the row-major 6x6. Faster commands
++// slip more, so the variance grows with speed; at a standstill it collapses
++// to sigma_floor^2 and the message becomes a zero-velocity update.
++void BaseDriver::set_twist_covariance() {
++  const double sx = odom_slip_frac_x * odom_out.twist.twist.linear.x;
++  const double sy = odom_slip_frac_y * odom_out.twist.twist.linear.y;
++  const double floor_var = odom_sigma_floor * odom_sigma_floor;
++  odom_out.twist.covariance[0] = sx * sx + floor_var;
++  odom_out.twist.covariance[7] = sy * sy + floor_var;
++}
++
+ void BaseDriver::integrate_odometry() {
+-  if (std::isnan(odom_last_heading))
++  if (std::isnan(odom_last_heading)) {
++    // No IMU heading yet, so there is no rotation to integrate through.
++    // Still advance the stamp: a message frozen at construction time falls
++    // outside robot_localization's sensor_timeout window and is dropped
++    // silently, which looks exactly like the filter ignoring this input.
++    odom_out.header.stamp = rclcpp::now();
+     return;
++  }
+   integrate_odometry(odom_last_heading);
+ }
+ 
+@@ -216,8 +251,48 @@ BaseDriver::BaseDriver() : Node("base") {
+   declare_parameter<std::string>("pid", "");
+   declare_parameter<std::string>("vid", "");
+   declare_parameter<int>("baud", 115200);
+-  declare_parameter<double>("k_linear", 1.28);
+-  odom_k_linear = get_parameter("k_linear").as_double();
++  // Per-axis throttle -> m/s gains, MEASURED against rf2o with
++  // scripts/odom_diagnose.py (2026-09-24, teleop throttle 0.25).
++  // rf2o's own scale was checked against a 90 in (2.286 m) tape run: 1%.
++  //
++  //   k_x 0.40  forward: rf2o/command slope 0.29-0.33 of the old 1.28,
++  //             r 0.88-0.98, ~600 scans. Not lag, not stalls. Confirmed
++  //             at 0.40: slope 0.96, r 0.93, 349 scans (run 190947).
++  //   k_y 0.30  strafe: slope 1.68 left / 1.69 right against 0.18, r
++  //             0.94 / 0.88, 177 pure-strafe scans (run 190947). An
++  //             earlier 0.18 came from runs where the few strafe samples
++  //             were mixed with other motion (r 0.57-0.65).
++  //
++  // The motors are near their deadband at throttle 0.25, so the real curve
++  // is not linear: these gains are right around that throttle and will
++  // UNDER-report at high throttle. Re-run the diagnose script at the speed
++  // you actually drive if that changes.
++  declare_parameter<double>("k_x", 0.40);
++  declare_parameter<double>("k_y", 0.30);
++  // Deliberately pessimistic starting point. Over-trusting velocity
++  // integrated from a command is the one way the EKF ends up worse than
++  // scan matching alone; tighten these only after k_x/k_y are calibrated.
++  declare_parameter<double>("slip_frac_x", 0.30);
++  declare_parameter<double>("slip_frac_y", 0.50);
++  declare_parameter<double>("sigma_floor", 0.01);
++  // Gyro Z -> REP-103 sign. MEASURED -1 (2026-09-24, scripts/odom_diagnose.py:
++  // gyro vs rf2o yaw rate slope -14.4, r -0.88 over 539 turning scans) --
++  // the flight controller counts yaw clockwise-positive.
++  declare_parameter<double>("gyro_z_sign", -1.0);
++  // deg/s per raw gyro unit. 1/16.4 = +-2000 dps sensor counts; the same
++  // run put the raw-to-rf2o ratio at 14.4 (and ~16 against AMCL's heading).
++  declare_parameter<double>("gyro_scale", 1.0 / 16.4);
++  // Yaw-rate std dev, rad/s. Parked bias measured ~0.006 rad/s; 0.03 leaves
++  // room for that and for gyro_scale being a few percent off.
++  declare_parameter<double>("gyro_sigma", 0.03);
++  odom_k_x = get_parameter("k_x").as_double();
++  odom_k_y = get_parameter("k_y").as_double();
++  odom_slip_frac_x = get_parameter("slip_frac_x").as_double();
++  odom_slip_frac_y = get_parameter("slip_frac_y").as_double();
++  odom_sigma_floor = get_parameter("sigma_floor").as_double();
++  odom_gyro_z_sign = get_parameter("gyro_z_sign").as_double();
++  odom_gyro_sigma = get_parameter("gyro_sigma").as_double();
++  gyro_scale = get_parameter("gyro_scale").as_double();
+   param.vid = hex_string(get_parameter("vid").as_string());
+   param.pid = hex_string(get_parameter("pid").as_string());
+   param.baud = get_parameter("baud").as_int();
+@@ -238,17 +313,28 @@ BaseDriver::BaseDriver() : Node("base") {
+   odom_out.header.frame_id = "odom";
+   odom_out.child_frame_id = "base_footprint";
+   odom_out.header.stamp = rclcpp::now();
++  // The pose here is open-loop dead reckoning with unbounded error and is
++  // never fused (see config/ekf_fused_odom.yaml, which takes twist only).
++  // Say so: an all-zero covariance means "known exactly" to REP-103
++  // consumers, which is the opposite of the truth.
++  for (int i = 0; i < 6; i++)
++    odom_out.pose.covariance[i * 7] = 1e6;
++  // Of the twist, vx and vy come from the command and yaw rate from the
++  // gyro. vz/roll/pitch rates are not measured on this base.
++  for (int i = 2; i < 5; i++)
++    odom_out.twist.covariance[i * 7] = 1e6;
++  odom_out.twist.covariance[35] = odom_gyro_sigma * odom_gyro_sigma;
+   // Timer loop for serial I/O
+-  timers.push_back(create_timer(50ms, [this]() {
++  timers.push_back(create_wall_timer(50ms, [this]() {
+     if (imu_status.query())
+       device->query<MSP::RAW_IMU>();
+     else
+       device->query<MSP::ATTITUDE>();
+   }));
+   timers.push_back(
+-      create_timer(2000ms, [this]() { device->query<MSP::ANALOG>(); }));
++      create_wall_timer(2000ms, [this]() { device->query<MSP::ANALOG>(); }));
+   // Debounced velocity command
+-  timers.push_back(create_timer(10ms, [this]() {
++  timers.push_back(create_wall_timer(10ms, [this]() {
+     if (velocity_io.updated) {
+       motion(velocity_io.linear.x, velocity_io.linear.y, velocity_io.angular.z);
+       velocity_io();
+@@ -260,6 +346,19 @@ BaseDriver::BaseDriver() : Node("base") {
+         halt();
+       }
+     }
++    // Odometry publish, ~50 Hz (every other tick of this 10 ms timer).
++    //
++    // Deliberately NOT the commented-out odom_out() calls in motion() and
++    // halt(): halt() is re-entered every 10 ms once the watchdog above
++    // expires, so publishing from inside it would emit 100 Hz odometry for
++    // as long as the rover sits idle. Driving it from the timer covers the
++    // moving and the halted case at one predictable rate.
++    if (++odom_publish_tick >= 2) {
++      odom_publish_tick = 0;
++      integrate_odometry();
++      set_twist_covariance();
++      odom_out();
++    }
+   }));
+ }
+ 

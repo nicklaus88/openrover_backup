@@ -1,0 +1,5 @@
+# Force person_follower_node to lock onto a specific track id, mirroring
+# the original monocular_person_following/Imprint.srv.
+int64 target_id
+---
+bool success

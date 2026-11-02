@@ -38,8 +38,23 @@ private:
   void update(MSP::RAW_IMU data, time_point timestamp);
   void update(MSP::ATTITUDE data, time_point timestamp);
 
-  // Linear velocity normalization factor (m/s)
-  double odom_k_linear;
+  // Throttle [-1,1] -> m/s normalization, one factor per axis. A mecanum
+  // base loses far more to roller slip when strafing than when driving
+  // forward, so a single gain cannot describe both.
+  double odom_k_x, odom_k_y;
+  // Twist covariance model: var = (slip_frac * v)^2 + sigma_floor^2.
+  // At rest this collapses to sigma_floor^2, which is the zero-velocity
+  // update -- the strongest statement available on a base with no encoders.
+  double odom_slip_frac_x, odom_slip_frac_y, odom_sigma_floor;
+  // Gyro yaw rate as published in odom twist.angular.z. The sign maps the
+  // flight controller's gyro Z onto REP-103 (CCW positive) and is
+  // UNVERIFIED -- scripts/odom_diagnose.py measures it against rf2o.
+  double odom_gyro_z_sign, odom_gyro_sigma;
+  // deg/s per raw MSP gyro unit (see the gyro_scale parameter).
+  double gyro_scale;
+  void set_twist_covariance();
+  // Decimates the 10 ms command timer down to the odometry publish rate.
+  uint8_t odom_publish_tick = 0;
   double odom_initial_heading = NAN;
   double odom_last_heading = NAN;
   void integrate_odometry();

@@ -1,0 +1,21 @@
+# follow_style: balanced -- the default.
+#
+# Overlay for robot_controller_node, selected with
+#   ros2 launch person_follower person_follower.launch.py follow_style:=balanced
+# It is applied AFTER person_follower.yaml, so it only needs the params
+# that differ. These values match the base config, so this overlay is a
+# no-op -- it exists so every run in a training set names its style
+# explicitly rather than one of them being "whatever the default was".
+#
+# Keeps ~70% of the strafe of the `strafe` profile while holding the
+# target inside the frame at every angular gain tested.
+#
+# Sim, person walking laterally at 0.6 m/s, angular gain swept 1.5-4.0:
+#   mean|bearing| 12.9-14.8 deg   mean|vy| 0.075-0.086   out of FOV 0-9%
+robot_controller_node:
+  ros__parameters:
+    follow_style: "balanced"
+    yaw_deadband_deg: 12.0
+    gain_va: 1.1
+    max_va: 0.50
+    obstacle_frame_deadband_deg: 15.0

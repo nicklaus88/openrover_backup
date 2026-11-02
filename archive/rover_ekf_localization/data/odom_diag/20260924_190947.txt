@@ -1,0 +1,30 @@
+
+=== 1. rf2o measured vs commanded velocity (body frame) ===
+  forward vx: slope +0.96  r +0.93  n 349   agree
+  strafe  vy: slope +1.69  r +0.91  n 178   scale off -- multiply k by 1.69
+  (commanded = throttle * BaseDriver k_x / k_y)
+
+=== 2. path length ===
+  rf2o      9.53 m
+  fused     6.29 m
+  cmd       6.13 m
+  amcl      6.71 m
+  fused should sit close to rf2o. Near cmd instead = rf2o is
+  being rejected or out-weighted.
+
+=== 2b. heading: does the filter know it turned? ===
+  rf2o   turned      +4.8 deg (net, CCW +)
+  fused  turned      +4.0 deg (net, CCW +)
+  gyro   turned      +3.4 deg (net, CCW +)
+  fused should match rf2o. Well short of it = turns are being
+  dropped (rejection gate) or rf2o is missing fast rotation.
+  gyro vs rf2o yaw rate: slope +0.90  r +0.85  n 92   agree -- gyro sign is right, safe to fuse vyaw
+
+=== 3. loop closure: start -> end (only meaningful if you
+       stopped where you started) ===
+  rf2o   gap  0.464 m   heading   +4.82 deg
+  fused  gap  0.311 m   heading   +3.98 deg
+  cmd    gap  0.310 m   heading   +3.98 deg
+  amcl   gap  0.066 m   heading -170.74 deg
+
+  per-scan samples -> /workspace/ROS2-WorkSpace/bags/odom_diag/20260924_190947.csv

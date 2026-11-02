@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>oakd_camera</name>
+  <version>0.0.1</version>
+  <description>
+    OAK-D Lite bringup for the Jetson: starts depthai_ros_driver with a
+    Lite-specific configuration and republishes the colour stream as both
+    a raw sensor_msgs/Image and a JPEG sensor_msgs/CompressedImage.
+  </description>
+  <maintainer email="vaishnavr27@gmail.com">robopi</maintainer>
+  <license>BSD</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <exec_depend>depthai_ros_driver</exec_depend>
+  <exec_depend>depthai_descriptions</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

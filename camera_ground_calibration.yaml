@@ -1,0 +1,28 @@
+camera_ground_calibration:
+  height_m: 0.272065
+  downward_tilt_deg: -7.2139
+  roll_deg: -1.7351
+  height_std_m: 0.010247
+  tilt_std_deg: 0.4183
+  roll_std_deg: 0.1528
+  reprojection_rmse_px: 0.4366
+  status: FAILED
+  status_reasons:
+  - height std 0.0102 m exceeds limit 0.0050 m
+  - tilt std 0.418 deg exceeds limit 0.250 deg
+  - more than half of processed frames were rejected (199 rejected vs 100 accepted)
+  samples_accepted: 100
+  samples_rejected: 199
+  fiducial_type: aruco_single
+  camera:
+    width: 1280
+    height: 720
+    fx: 1006.6072998046875
+    fy: 1006.6072998046875
+    cx: 643.5465087890625
+    cy: 361.5382995605469
+    distortion_model: rational_polynomial
+  aruco_marker:
+    dictionary: DICT_ARUCO_ORIGINAL
+    marker_id: 1
+    marker_size_m: 0.12

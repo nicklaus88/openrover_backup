@@ -1,0 +1,97 @@
+aprilgrid_ground_calibrator:
+  ros__parameters:
+
+    # ---- Topics -------------------------------------------------------
+    # The rover's OAK-D Lite, via depthai_ros_driver launched with
+    # name:=oak (see launch/perception_oakd.py). These were previously
+    # the TurtleBot4's /tb4/oakd/... names.
+    #
+    # Use the FULL rgb stream, not a downscaled preview: the calibration
+    # solves against camera_info intrinsics, and a preview stream has
+    # completely different intrinsics from the stream it is cropped from.
+    # person_follower.yaml documents the same trap costing ~24m distance
+    # estimates for someone standing a couple of meters away.
+    image_topic: "/oak/rgb/image_raw"
+    camera_info_topic: "/oak/rgb/camera_info"
+
+    # "internal"    -> detect AprilTags directly from the image using
+    #                  pupil_apriltags (default, no external node needed).
+    #                  Ignored when fiducial_type: "aruco_single" (that
+    #                  mode always detects internally via cv2.aruco).
+    # "apriltag_ros" -> use an existing apriltag_ros / apriltag_msgs
+    #                  AprilTagDetectionArray topic instead of detecting
+    #                  tags in this node. The image is still subscribed
+    #                  for the debug visualization only.
+    detection_source: "internal"
+    apriltag_ros_topic: "/apriltag/detections"
+
+    # ---- Calibration target ---------------------------------------------
+    # "apriltag_grid" -> the 4x5 AprilGrid (joint PnP over up to 80
+    #                    corners -- see the tag_* params below).
+    # "aruco_single"  -> a single square ArUco marker instead (only 4
+    #                    corners, no grid redundancy, but much easier to
+    #                    print/mount large and legible). Currently in use:
+    #                    a 120mm DICT_ARUCO_ORIGINAL marker, id 1, printed
+    #                    as the solid black square itself (no extra white
+    #                    quiet-zone border baked into the 120mm figure).
+    fiducial_type: "aruco_single"
+    aruco_dictionary: "DICT_ARUCO_ORIGINAL"
+    aruco_marker_id: 1
+
+    # ---- AprilGrid geometry (only used when fiducial_type: "apriltag_grid") --
+    tag_family: "tag36h11"
+    tag_rows: 5
+    tag_cols: 4
+    tag_spacing: 0.008       # meters, gap between neighboring tags
+
+    # Flip the assumed per-tag corner winding order if the debug image
+    # shows corner index 0 is not physically the bottom-left corner of
+    # each tag on your board. (AprilGrid mode only -- aruco_single uses
+    # ArUco's own, fixed corner order, see ArucoMarkerGeometry.)
+    flip_tag_corner_order: false
+
+    # Side length of one fiducial square, in meters: the whole marker
+    # for aruco_single (measure the printed black square itself -- do
+    # NOT trust the printer's "fit to page" scaling), or one AprilGrid
+    # tag for apriltag_grid.
+    tag_size: 0.120
+
+    # ---- Detection / PnP acceptance ------------------------------------
+    # min_tags only matters for apriltag_grid; aruco_single always
+    # requires exactly the one configured aruco_marker_id (min_tags is
+    # ignored and effectively forced to 1 for that mode).
+    min_tags: 4
+    samples_required: 100
+
+    # If samples_required accepted frames haven't been collected within
+    # this many seconds, finalize anyway with whatever was collected
+    # (even zero) instead of waiting forever -- e.g. board never in view,
+    # wrong topic, tags too small/blurry to decode. <= 0 disables the
+    # timeout and waits indefinitely (the old default behavior).
+    calibration_timeout_sec: 300.0
+
+    max_reprojection_error_px: 1.0
+    pnp_ransac_reprojection_error_px: 3.0
+
+    # ---- Sanity-check thresholds ----------------------------------------
+    min_expected_height_m: 0.1
+    max_expected_height_m: 2.0
+    max_height_std_m: 0.005
+    max_tilt_std_deg: 0.25
+    max_roll_std_deg: 0.25
+    max_frame_height_jump_m: 0.03
+    max_frame_tilt_jump_deg: 2.0
+    edge_on_tilt_warning_deg: 5.0
+
+    # ---- pupil_apriltags detector tuning --------------------------------
+    apriltag_nthreads: 2
+    apriltag_quad_decimate: 1.0
+    apriltag_quad_sigma: 0.0
+
+    # ---- Debug / output --------------------------------------------------
+    axis_length_m: 0.05
+    show_debug_image: true
+    publish_tf: false
+    board_frame_id: "ground"
+    camera_optical_frame_id: "oakd_rgb_camera_optical_frame"
+    output_yaml_path: "camera_ground_calibration.yaml"

@@ -1,0 +1,132 @@
+# OAK-D Lite (MXID 1844301031420E1300 on this robot) -- depthai_ros_driver
+# camera settings plus the RGB relay node's own parameters.
+#
+# Lite-specific things that are NOT true of the full-size OAK-D:
+#   * there is no IMU on the Lite. Leaving i_enable_imu at the driver's
+#     default true only earns you "IMU enabled but not available!" at
+#     every startup, so it is turned off explicitly here.
+#   * there is no IR laser dot projector / floodlight, hence i_enable_ir
+#     false -- the Lite's stereo is passive.
+#   * the mono pair is OV7251, so 480P is the ceiling. Asking for 720P or
+#     800P here fails at pipeline build time.
+
+/oak:
+  ros__parameters:
+
+    camera:
+      # RGBD = RGB + the aligned stereo depth stream. Use "RGB" if you
+      # only ever want the colour camera and want the mono pair to stay
+      # powered down.
+      i_pipeline_type: RGB
+
+      # No on-device neural network. The driver otherwise loads mobilenet
+      # by default and burns SHAVE cores on detections nothing consumes.
+      i_nn_type: none
+
+      # The Lite has no IR laser dot projector / floodlight.
+      i_enable_ir: false
+
+    pipeline_gen:
+      # Turning the IMU off has to happen HERE, not under `camera:`.
+      # The "IMU enabled but not available!" check lives in
+      # pipeline_generator.cpp, which reads its parameters from the
+      # pipeline_gen namespace -- camera.i_enable_imu is accepted
+      # without complaint and then ignored. Verified on this camera:
+      # the warning only goes away with this key.
+      i_enable_imu: false
+
+    rgb:
+      i_publish_topic: true
+
+      # i_resolution is the SENSOR mode; what actually gets published is
+      # the ISP output sized by i_width/i_height, which default to
+      # 1280x720. Both are spelled out here because setting only
+      # i_resolution: '1080P' still yields 720p frames on the wire (a
+      # 2.76 MB Image message, measured) -- which looks like the setting
+      # being ignored. Raise i_width/i_height to 1920x1080 to actually
+      # publish 1080p, and expect ~6.2 MB per raw frame if you do.
+      i_resolution: '1080P'
+      i_width: 640
+      i_height: 360
+
+      i_fps: 30.0
+
+      # The on-device "preview" stream: a second, smaller copy of the
+      # same colour frames on /oak/rgb/preview/image_raw. Attractive for
+      # a detector -- 256*256*3 = 197 KB/frame against 640*360*3 = 691 KB,
+      # resized on the camera instead of on the Jetson.
+      #
+      # OFF, because depthai gets its camera_info WRONG. Measured on this
+      # camera 2026-08-26, preview 256x256 from the 640x360 ISP output:
+      #
+      #     /oak/rgb/camera_info          fx = fy = 503.30  (640x360)
+      #     /oak/rgb/preview/camera_info  fx = fy = 201.32  (256x256)
+      #
+      # 201.32 is exactly 503.30 * 256/640 -- it scales BOTH axes by the
+      # WIDTH ratio. That is only right if the preview preserves the
+      # source aspect ratio. With i_keep_preview_aspect_ratio false the
+      # 16:9 frame is squashed into a square, so y is really scaled by
+      # 256/360 and the true fy is 357.9. The published fy is 1.78x too
+      # small, and nothing detects it: cx/cy come out correct, and
+      # pose_detector_node's _intrinsics() only rescales K when the image
+      # SIZE disagrees with camera_info -- here both say 256x256, so
+      # sx=sy=1.0 and the bad fy is used as-is, silently.
+      #
+      # Consequence, seen on the robot: ground_plane ranging divides by
+      # fy, so every distance came out 1.78x short. A person at 2.5 m
+      # read as 1.4 m, inside `distance` (1.6 m) permanently, and
+      # robot_controller_node drove BACKWARDS instead of following.
+      #
+      # If you want the bandwidth win back, the safe shape is a preview
+      # that keeps the source aspect ratio -- e.g. 256x144 against this
+      # 640x360 output. Then the uniform width-ratio scaling depthai
+      # applies is the correct one, and fx=fy=201.32 is genuinely right.
+      # The cost is vertical resolution (144 rows), which ground_plane is
+      # sensitive to because it ranges off the ankle pixel ROW. Verify
+      # against /oak/rgb/preview/camera_info before trusting it.
+      i_enable_preview: false
+
+    stereo:
+      i_publish_topic: true
+      i_align_depth: true
+      i_lr_check: true
+      i_subpixel: false
+
+
+/oakd_rgb_publisher_node:
+  ros__parameters:
+
+    # Where the depthai driver puts its colour frames. Follows the
+    # driver's `name` launch argument -- change both together.
+    input_topic: /oak/rgb/image_raw
+
+    # The two topics this node fans out to.
+    #
+    # The raw name is deliberately the rover's existing camera contract:
+    # launch/perception.py remaps camera_detection/perception's "img"
+    # input to /capture/camera_0/img, which used to be fed by the
+    # spinnaker_camera "capture" node. That submodule is empty in this
+    # checkout (src/spinnaker_camera has no files -- it points at an SSH
+    # git@ URL), so nothing was publishing it. Publishing here means
+    # perception.py works unmodified with the OAK-D as its source.
+    raw_topic: /capture/camera_0/img
+    compressed_topic: /capture/camera_0/img/compressed
+
+    publish_raw: true
+    publish_compressed: true
+
+    # 1-100. 80 is a good size/quality tradeoff for 1080p over WiFi.
+    jpeg_quality: 80
+
+    # 'reliable' (default) or 'best_effort'. Keep reliable. This no
+    # longer matters for camera_detection/perception -- that node now
+    # reads /oak/rgb/image_raw directly and subscribes BEST_EFFORT, which
+    # matches a publisher of either kind -- but it still matters for
+    # `ros2 topic echo` and rqt_image_view, which default to RELIABLE and
+    # show an empty topic against a BEST_EFFORT publisher.
+    qos_reliability: reliable
+
+    # 0.0 = relay every frame the driver produces. Set e.g. 5.0 to thin
+    # the stream out for a remote viewer without touching i_fps (which
+    # would also slow the depth pipeline).
+    max_rate_hz: 0.0

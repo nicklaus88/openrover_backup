@@ -2,6 +2,7 @@ import numpy as np
 import os
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
@@ -28,8 +29,31 @@ class Perception(Node):
         self.br = CvBridge()
         self.frame_index = 0
 
+        # BEST_EFFORT, depth 1 -- not the old plain `10` (which is
+        # RELIABLE, depth 10). Two reasons:
+        #
+        #  * Matching. This node now reads the depthai driver's
+        #    /oak/rgb/image_raw directly instead of oakd_camera's relay.
+        #    A RELIABLE *subscriber* does not match a BEST_EFFORT
+        #    *publisher*, so a sensor-QoS driver topic would have left
+        #    this node silently receiving nothing. BEST_EFFORT matches
+        #    either kind, so it is also still correct against the relay.
+        #
+        #  * Lag. onCameraFrame keeps only the newest frame and the
+        #    perception thread discards whatever it did not get to, so a
+        #    depth-10 RELIABLE queue could only ever hand us stale
+        #    frames -- at 30 fps that is up to a third of a second of
+        #    backlog to work through after any YOLO hitch. Depth 1 drops
+        #    the stale ones in the middleware instead.
         self.subscription = self.create_subscription(
-            Image, "img", self.onCameraFrame, 10
+            Image,
+            "img",
+            self.onCameraFrame,
+            QoSProfile(
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+            ),
         )
 
         self.velocity_publisher = self.create_publisher(

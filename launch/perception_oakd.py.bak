@@ -1,0 +1,198 @@
+"""perception.py, but sourced from the OAK-D Lite instead of Spinnaker.
+
+Identical to launch/perception.py except that the spinnaker_camera
+"capture" node is replaced by the depthai driver + oakd_camera relay,
+which publish the same /capture/camera_0/img topic. perception.py's own
+node list is left untouched so the original still works if the Spinnaker
+submodule is ever checked out.
+
+On top of that this file also brings up the robot's other two sensors,
+so one command gives you every eye the rover has:
+
+    /capture/camera_0/img        forward   OAK-D Lite   (oakd_camera)
+    /capture/camera_left/img     left      BlueRobotics (side_cameras)
+    /capture/camera_right/img    right     BlueRobotics (side_cameras)
+    /scan                        RPLIDAR A1              (sllidar_ros2)
+
+Each of the three is behind its own switch, because they overlap with
+other launch files -- launch/mapping.py starts its own sllidar_node, and
+running two against one serial port leaves both failing to connect:
+
+    ros2 launch launch/perception_oakd.py
+    ros2 launch launch/perception_oakd.py use_lidar:=false          # mapping.py has it
+    ros2 launch launch/perception_oakd.py use_side_cameras:=false   # forward camera only
+
+If the two side views come out swapped, override the device paths (see
+config/side_cameras.yaml for why they are by-path symlinks):
+
+    ros2 launch launch/perception_oakd.py \
+        left_camera_device:=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.2.3:1.0-video-index0 \
+        right_camera_device:=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.2.1:1.0-video-index0
+"""
+
+import os
+from pathlib import Path
+from shutil import rmtree
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+HOME = Path(__file__).parent.parent
+VAR = HOME / "var"
+
+# perception.py does a bare rmtree(VAR) here, which raises if var/ is
+# missing (e.g. a fresh clone). Same intent, without that failure mode.
+rmtree(VAR, ignore_errors=True)
+VAR.mkdir(parents=True, exist_ok=True)
+
+PARAMS = os.path.join(
+    get_package_share_directory("oakd_camera"), "config", "oakd_lite.yaml"
+)
+
+SIDE_PARAMS = os.path.join(
+    get_package_share_directory("side_cameras"), "config", "side_cameras.yaml"
+)
+
+DEPTHAI_LAUNCH = os.path.join(
+    get_package_share_directory("depthai_ros_driver"), "launch", "camera.launch.py"
+)
+
+camera = IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(DEPTHAI_LAUNCH),
+    launch_arguments={
+        "name": "oak",
+        "params_file": PARAMS,
+        "camera_model": "OAK-D-LITE",
+        "parent_frame": "oak-d-base-frame",
+        "rectify_rgb": "true",
+    }.items(),
+)
+
+nodes = [
+    Node(
+        package="rover",
+        executable="base",
+        namespace="rover",
+        parameters=[
+            {"vid": "x0483"},
+            {"pid": "x5740"},
+        ],
+    ),
+    # Replaces: Node(package="spinnaker_camera", executable="capture",
+    #                namespace="capture")
+    Node(
+        package="oakd_camera",
+        executable="oakd_rgb_publisher_node",
+        name="oakd_rgb_publisher_node",
+        output="screen",
+        parameters=[PARAMS],
+    ),
+    Node(
+        package="camera_detection",
+        executable="perception",
+        namespace="capture",
+        remappings=[("img", "/capture/camera_0/img")],
+    ),
+    Node(
+        package="camera_detection",
+        executable="operation",
+    ),
+]
+
+
+def side_cameras(context, *_args, **_kwargs):
+    """The two BlueRobotics side cameras, one node each.
+
+    Built in an OpaqueFunction rather than listed above so the device
+    arguments can stay *overrides*: everything comes from
+    side_cameras.yaml, and a device path is only injected on top when the
+    caller actually passed one. Declaring the by-path defaults here
+    instead would mean editing `device:` in the yaml had no effect when
+    launched from this file -- the launch value would always win.
+    """
+    enabled = IfCondition(LaunchConfiguration("use_side_cameras"))
+    out = []
+    for side in ("left", "right"):
+        params = [SIDE_PARAMS]
+        device = LaunchConfiguration(f"{side}_camera_device").perform(context)
+        if device:
+            params.append({"device": device})
+        out.append(
+            Node(
+                package="side_cameras",
+                executable="side_camera_node",
+                # Has to match the key in side_cameras.yaml.
+                name=f"{side}_camera",
+                output="screen",
+                parameters=params,
+                condition=enabled,
+            )
+        )
+    return out
+
+
+# The RPLIDAR A1. Same parameters as launch/mapping.py -- keep the two in
+# step if you retune one. Note the A1 runs at 115200; the C1 and later
+# models use 460800 and will just time out at this baudrate.
+lidar = Node(
+    package="sllidar_ros2",
+    executable="sllidar_node",
+    name="sllidar_node",
+    output="screen",
+    condition=IfCondition(LaunchConfiguration("use_lidar")),
+    parameters=[{
+        "channel_type": "serial",
+        "serial_port": LaunchConfiguration("lidar_serial_port"),
+        "serial_baudrate": LaunchConfiguration("lidar_serial_baudrate"),
+        "frame_id": LaunchConfiguration("lidar_frame_id"),
+        "inverted": False,
+        "angle_compensate": True,
+        "scan_mode": "Sensitivity",
+    }],
+)
+
+args = [
+    DeclareLaunchArgument(
+        "use_side_cameras", default_value="true",
+        description="Start the left/right BlueRobotics cameras"),
+    DeclareLaunchArgument(
+        "left_camera_device", default_value="",
+        description="Override the left camera's device path "
+                    "(empty = use config/side_cameras.yaml)"),
+    DeclareLaunchArgument(
+        "right_camera_device", default_value="",
+        description="Override the right camera's device path "
+                    "(empty = use config/side_cameras.yaml)"),
+    DeclareLaunchArgument(
+        "use_lidar", default_value="true",
+        description="Start sllidar_node (false if mapping.py already has it)"),
+    DeclareLaunchArgument(
+        # /dev/ttyUSB0 is the lidar's CP2102 bridge. It is the only ttyUSB
+        # on this robot (the flight controller is ttyACM0), so the number
+        # is stable in practice; if that ever changes, the by-id path
+        # /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+        # names the same device unambiguously.
+        "lidar_serial_port", default_value="/dev/ttyUSB0",
+        description="Serial port the RPLIDAR A1 is on"),
+    DeclareLaunchArgument(
+        "lidar_serial_baudrate", default_value="115200",
+        description="A1 = 115200; C1 and later = 460800"),
+    DeclareLaunchArgument(
+        "lidar_frame_id", default_value="laser",
+        description="TF frame the scan is published in"),
+]
+
+
+def generate_launch_description():
+    return LaunchDescription(
+        args + [camera] + nodes + [OpaqueFunction(function=side_cameras), lidar]
+    )

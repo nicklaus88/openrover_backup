@@ -1,0 +1,105 @@
+diff --git a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+index 8a1e170..c5b0325 100644
+--- a/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
++++ b/include/rf2o_laser_odometry/CLaserOdometry2DNode.hpp
+@@ -1,5 +1,7 @@
+ #include "rf2o_laser_odometry/CLaserOdometry2D.hpp"
+ 
++#include <vector>
++
+ #include <tf2/convert.h>
+ #include <tf2/exceptions.h>
+ #include <tf2_ros/transform_broadcaster.h>
+@@ -29,6 +31,9 @@ public:
+   std::string         base_frame_id;
+   std::string         odom_frame_id;
+   std::string         init_pose_from_topic;
++  // LOCAL PATCH (OpenRover, see publish()): upstream leaves pose.covariance
++  // all-zero. grep RF2O_LOCAL_PATCH before pulling a newer upstream.
++  std::vector<double> pose_covariance_diagonal;
+ 
+   sensor_msgs::msg::LaserScan                     last_scan;
+   bool                                            GT_pose_initialized;
+diff --git a/src/CLaserOdometry2DNode.cpp b/src/CLaserOdometry2DNode.cpp
+index 2206777..fd01c84 100644
+--- a/src/CLaserOdometry2DNode.cpp
++++ b/src/CLaserOdometry2DNode.cpp
+@@ -39,6 +39,10 @@ CLaserOdometry2DNode::CLaserOdometry2DNode(): Node("CLaserOdometry2DNode")
+   this->get_parameter("init_pose_from_topic", init_pose_from_topic);
+   this->declare_parameter<double>("freq", 10.0);
+   this->get_parameter("freq", freq);
++  // RF2O_LOCAL_PATCH: see publish().
++  this->declare_parameter<std::vector<double>>(
++      "pose_covariance_diagonal", {1e-3, 1e-3, 1e6, 1e6, 1e6, 1e-3});
++  this->get_parameter("pose_covariance_diagonal", pose_covariance_diagonal);
+ 
+   // Init Publishers and Subscribers
+   //---------------------------------
+@@ -97,10 +101,30 @@ void CLaserOdometry2DNode::LaserCallBack(const sensor_msgs::msg::LaserScan::Shar
+     }
+     else
+     {
++      // ---- RF2O_LOCAL_PATCH (OpenRover) ----------------------------------
++      // Upstream initialized on the first scan whether or not the laser
++      // TF lookup succeeded, and never retried. On failure the laser pose
++      // silently became IDENTITY, and this lidar is mounted yawed by pi:
++      // every forward move was reported backwards, every left strafe as
++      // right, with no error after the first. That is the normal case,
++      // not a corner case, whenever the lidar is already publishing when
++      // this node starts (robot_start.py up first, then localization.py):
++      // the first scan beats /tf_static into the fresh TF buffer.
++      //
++      // So: do not initialize until the transform is actually known.
++      // Scans before that are dropped; the next one retries.
++      if (!setLaserPoseFromTf())
++      {
++        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
++          "Waiting for TF %s -> %s before initializing; scan dropped",
++          base_frame_id.c_str(), last_scan.header.frame_id.c_str());
++        return;
++      }
++      // --------------------------------------------------------------------
+       // Initialize module on first scan (from laser params)
+-      setLaserPoseFromTf();
+       rf2o_ref.init(last_scan, initial_robot_pose.pose.pose);
+       rf2o_ref.first_laser_scan = false;
++      RCLCPP_INFO(get_logger(), "Laser pose from TF acquired; rf2o initialized");
+     }
+   }
+ }
+@@ -122,8 +146,10 @@ bool CLaserOdometry2DNode::setLaserPoseFromTf()
+   }
+   catch (tf2::TransformException &ex)
+   {
+-    RCLCPP_ERROR(get_logger(), "%s",ex.what());
+-    retrieved = false;
++    // RF2O_LOCAL_PATCH: return BEFORE setLaserPose. Falling through here
++    // used to install a default-constructed (identity) laser pose.
++    RCLCPP_DEBUG(get_logger(), "%s", ex.what());
++    return false;
+   }
+ 
+   // Keep this transform as Eigen Matrix3d
+@@ -223,6 +249,22 @@ void CLaserOdometry2DNode::publish()
+   odom.twist.twist.linear.x = rf2o_ref.lin_speed;    //linear speed
+   odom.twist.twist.linear.y = 0.0;
+   odom.twist.twist.angular.z = rf2o_ref.ang_speed;   //angular speed
++
++  // ---- RF2O_LOCAL_PATCH (OpenRover) --------------------------------------
++  // Upstream never touches odom.covariance, leaving it all-zero. To an
++  // EKF that reads as "known exactly", which is unusable as a measurement
++  // covariance, so robot_localization cannot consume this topic as shipped.
++  // Fill the pose diagonal (x, y, z, roll, pitch, yaw) from a parameter.
++  //
++  // Only pose is filled. The twist above is NOT fused by our EKF: linear.y
++  // is hardcoded 0 (this is an omni base that strafes) and lin_speed is
++  // acu_trans(0,2)/dt, the x component only. Deriving a real vy from
++  // acu_trans(1,2) would change this node's output contract, so it is left
++  // alone -- config/ekf_fused_odom.yaml takes rf2o's pose, differentially.
++  for (size_t i = 0; i < 6 && i < pose_covariance_diagonal.size(); i++)
++    odom.pose.covariance[i * 7] = pose_covariance_diagonal[i];
++  // ------------------------------------------------------------------------
++
+   //publish the message
+   odom_pub->publish(odom);
+ 

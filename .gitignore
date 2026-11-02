@@ -28,3 +28,9 @@ __pycache__
 # Outputs
 var
 *.osa
+
+# Archive branch additions
+bags/
+core
+*.pt
+.pytest_cache
