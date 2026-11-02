@@ -1,0 +1,189 @@
+# OAK-D Lite (MXID 1844301031420E1300 on this robot) -- depthai_ros_driver
+# camera settings, loaded by launch/robot.launch.py.
+#
+# Lite-specific things that are NOT true of the full-size OAK-D:
+#   * there is no IMU on the Lite. Leaving i_enable_imu at the driver's
+#     default true only earns you "IMU enabled but not available!" at
+#     every startup, so it is turned off explicitly here.
+#   * there is no IR laser dot projector / floodlight, hence i_enable_ir
+#     false -- the Lite's stereo is passive.
+#   * the mono pair is OV7251, so 480P is the ceiling. Asking for 720P or
+#     800P here fails at pipeline build time.
+
+/oak:
+  ros__parameters:
+
+    camera:
+      # RGBD = RGB + the aligned stereo depth stream. Use "RGB" if you
+      # only ever want the colour camera and want the mono pair to stay
+      # powered down.
+      i_pipeline_type: RGB
+
+      # No on-device neural network. The driver otherwise loads mobilenet
+      # by default and burns SHAVE cores on detections nothing consumes.
+      i_nn_type: none
+
+      # The Lite has no IR laser dot projector / floodlight.
+      i_enable_ir: false
+
+    pipeline_gen:
+      # Turning the IMU off has to happen HERE, not under `camera:`.
+      # The "IMU enabled but not available!" check lives in
+      # pipeline_generator.cpp, which reads its parameters from the
+      # pipeline_gen namespace -- camera.i_enable_imu is accepted
+      # without complaint and then ignored. Verified on this camera:
+      # the warning only goes away with this key.
+      i_enable_imu: false
+
+    rgb:
+      # ------------------------------------------------------------
+      # Ported from TurtleBot4's own OAK-D Lite settings:
+      # turtlebot4_robot/turtlebot4_bringup/config/oakd_lite.yaml
+      # (humble branch, fetched 2026-08-26). TB4 runs the same
+      # host-side ray-to-ground ranging this rover does -- and note
+      # i_nn_type: none / i_pipeline_type: RGB above, so there is no
+      # on-device neural network involved on either robot.
+      #
+      # Deviations from that file, all deliberate:
+      #
+      #  * i_usb_speed: SUPER_PLUS  -- OMITTED, but NOT because it was
+      #    shown to fail. It did fail once here with "Device already
+      #    closed or disconnected: Input/output error", but an orphaned
+      #    driver process was still holding the camera at the time, so
+      #    that result proves nothing. Left unset simply because depthai
+      #    negotiates fine on its own -- this rover comes up at USB SPEED
+      #    SUPER. Set it if you want TB4 parity; retest on a clean device.
+      #
+      #  * i_publish_topic: true  -- TB4 has FALSE, publishing ONLY the
+      #    preview so no full-size stream exists to mis-pair with. Kept
+      #    true here so /oak/rgb/image_raw stays available and the two
+      #    can be compared. The cost is that the wrong pairing is
+      #    reachable -- see camera_info_topic in
+      #    person_follower.launch.py.
+      #
+      #  * i_resolution: '1080P' not '1080'. The driver warns
+      #    "Resolution 1080 not supported by sensor IMX214" and falls
+      #    back to 1080P anyway; this just spells it correctly.
+      # ------------------------------------------------------------
+      i_board_socket_id: 0
+      i_interleaved: false
+      i_max_q_size: 10
+
+      i_publish_topic: true
+
+      # i_resolution is the SENSOR mode; what actually gets published is
+      # the ISP output sized by i_width/i_height. 1280x720 matches TB4.
+      # This is 4x the pixels of the 640x360 previously set here -- about
+      # 2.76 MB per raw Image message.
+      i_resolution: '1080P'
+      i_width: 1280
+      i_height: 720
+
+      i_fps: 30.0
+
+      # Encoded rather than raw on the wire. TB4 runs this way.
+      i_low_bandwidth: true
+
+      # The on-device "preview": a second, smaller copy of the same
+      # frames on /oak/rgb/preview/image_raw.
+      #
+      # HISTORICAL -- the bug below is what the 16:9 sizing at the bottom
+      # of this block avoids. It applied to the old 250-square,
+      # aspect-ratio-PRESERVED settings (TB4's values), where the ISP
+      # frame was centre-cropped to square before scaling. Kept because
+      # anything that reintroduces a crop reintroduces this exactly.
+      #
+      # depthai publishes a WRONG focal length for the preview, and it
+      # does so on TurtleBot4's own settings too -- this is a driver bug,
+      # not something TB4 configures around. Measured on this camera
+      # 2026-08-26 with exactly the values below (250 square,
+      # keep_aspect_ratio true, ISP 1280x720):
+      #
+      #                      reported            true
+      #   full 1280x720      fx=fy=1006.607      -
+      #   preview 250x250    fx=fy= 196.603      fx=fy=349.52
+      #                      cx=125.69           cx=126.24
+      #                      cy=125.30           cy=125.53
+      #
+      # 196.603 is exactly 1006.607 * 250/1280 -- the WIDTH ratio. But
+      # keep_aspect_ratio true centre-crops 1280x720 to 720x720 first, so
+      # the real scale is 250/720 and both focal lengths should be
+      # 349.52. Published f is 1.778x (= 16/9) too small.
+      #
+      # Note cx/cy ARE crop-correct. The driver transforms the principal
+      # point properly and then scales focal length by the wrong ratio,
+      # which is what makes this so easy to miss -- three of the four
+      # numbers look right.
+      #
+      # Nothing downstream catches it either: pose_detector_node's
+      # _intrinsics() only rescales K when the image SIZE disagrees with
+      # camera_info, and here both say 250x250, so sx=sy=1.0 and the bad
+      # f is used as-is.
+      #
+      # Consequence seen on this robot (at 256 square from a 640x360 ISP,
+      # same 16/9 error): ground_plane ranging divides by fy, so every
+      # distance came out 1.78x short. A person at 2.5 m read as 1.4 m,
+      # inside `distance` (1.6 m) permanently, and robot_controller_node
+      # drove BACKWARDS instead of following.
+      #
+      # So: the preview is fine as a detector INPUT, but do not feed
+      # /oak/rgb/preview/camera_info to anything that turns pixels into
+      # metres unless you correct f by 16/9 first. person_follower's
+      # image_topic/camera_info_topic are deliberately on the full-size
+      # stream for this reason -- and camera_ground_calibration.yaml was
+      # solved at 1280x720 fx=1006.6, which the full stream now matches
+      # natively (it did not when this was 640x360).
+      #
+      # If TB4's follower worked off the preview, the 1.78x was almost
+      # certainly absorbed into empirically-tuned camera_height /
+      # camera_pitch_deg rather than being correct.
+      # ### CHANGED 2026-08-28: 250 SQUARE -> 512x288 (16:9) ###########
+      # The square crop above was costing 44% of the HORIZONTAL field of
+      # view, and that was losing the person:
+      #
+      #     250x250 (cropped to 720x720 first)  half-FOV 19.7 deg
+      #     512x288 (no crop, matches ISP 16:9) half-FOV 32.4 deg
+      #
+      # Two things make this close to free.
+      #
+      # 1. It costs nothing on the GPU. pose_detector_node calls
+      #    ultralytics predict() with no imgsz, so it letterboxes EVERY
+      #    frame to 640x640 before inference regardless of source size.
+      #    The 250 square preview was being upscaled to 640 -- paying
+      #    full 640-inference cost for a quarter of the detail and 60% of
+      #    the field of view. 512x288 is 2.36x the pixels but still 6x
+      #    fewer than the full 1280x720 stream, and the network sees the
+      #    same 640x640 either way. Only transport/decode cost changes.
+      #
+      # 2. It fixes the focal-length bug rather than working around it.
+      #    The driver scales preview f by preview_width/ISP_width. With
+      #    no crop that ratio is CORRECT, and because 512/1280 == 288/720
+      #    it is correct for fy too:
+      #        reported fx=fy = 1006.607 * 512/1280 = 402.64  <- true
+      #        cx = 256, cy = 144                             <- true
+      #    So person_follower's camera_focal_scale goes back to 1.0. The
+      #    1.7777778 correction existed ONLY because of the square crop.
+      #
+      # VERTICAL FOV IS UNCHANGED (both keep all 720 ISP rows), so the
+      # ground-plane blind zone and the 1.6 m standoff in
+      # person_follower/config/person_follower.yaml still hold exactly.
+      #
+      # Keep width:height at 16:9. Any other ratio either re-introduces
+      # the crop (with keep_aspect_ratio true) or makes fx != fy (with it
+      # false), and camera_focal_scale is a single scalar applied to
+      # both, so it cannot express an anisotropic correction.
+      # ##################################################################
+      i_enable_preview: true
+      i_preview_width: 512
+      i_preview_height: 288
+      # Already exactly the ISP aspect, so there is nothing to preserve
+      # and this is a no-op either way. Explicitly false so "no crop" is
+      # guaranteed by configuration rather than by the sizes happening to
+      # divide evenly.
+      i_keep_preview_aspect_ratio: false
+
+    stereo:
+      i_publish_topic: true
+      i_align_depth: true
+      i_lr_check: true
+      i_subpixel: false

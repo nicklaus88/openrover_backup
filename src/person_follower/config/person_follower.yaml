@@ -1,0 +1,583 @@
+# Tuning parameters for the person_follower pipeline.
+#
+# State machine (person_follower_node), mirroring the comment in the
+# original monocular_person_following launch file:
+#
+#   SEARCH:     if a person is within imprint_max_distance and roughly
+#               centered (imprint_max_angle_deg) for imprint_hold_time
+#               seconds, they are locked as the target.
+#   TRACKING:   publishing the locked track's id; building a rolling
+#               appearance model of the target.
+#   LOST:       target's track id vanished; waiting lost_timeout before
+#               trying to re-identify.
+#   REACQUIRE:  matching new tracks against the stored appearance;
+#               relocks after reacquire_positive_count consecutive
+#               matches, or gives up (-> SEARCH) after reacquire_timeout.
+
+pose_detector_node:
+  ros__parameters:
+    model_path: "/home/robopi/rover_ws/models/yolo11n-pose.pt"
+    device: "auto"
+    confidence_threshold: 0.5
+    keypoint_confidence_threshold: 0.3
+
+    # "ground_plane" (default): ray-cast through the ankle keypoints onto
+    #   the floor using camera_height/camera_pitch_deg below -- no depth
+    #   needed, runs at full RGB rate (~8Hz measured on this robot).
+    # "depth": back-project real stereo depth at the hip keypoints.
+    #   More accurate, but only as fast as the depth topic -- measured
+    #   only ~1.2-1.6Hz here (jittery, gaps up to ~1.1s, likely the
+    #   OAK-D's onboard spatial NN eating into stereo throughput), which
+    #   bottlenecks the whole pipeline down to that rate. Switch back to
+    #   this once that's fixed (e.g. disabling depthai_ros_driver's
+    #   onboard NN on the depth pipeline, i_nn_type param, robot-side).
+    position_source: "ground_plane"
+
+    # --- ground_plane params (only used when position_source above is
+    # "ground_plane") ---
+    #
+    # CALIBRATED ON THIS ROVER, 2026-08-25.
+    # Source: ROS2-WorkSpace/camera_ground_calibration.yaml
+    # (aprilgrid_ground_calibrator, aruco_single, 120mm DICT_ARUCO_ORIGINAL
+    # id 1, 100 accepted samples). This is the rover's own OAK-D Lite --
+    # fx 1006.61 here vs 1024.13 on the TurtleBot4's camera, i.e. a
+    # physically different device with its own factory intrinsics, so
+    # nothing about the old calibration carries over.
+    #
+    # Sign convention, same in both nodes: POSITIVE camera_pitch_deg =
+    # tilted DOWN toward the floor. This mount is tilted UP.
+    #
+    # ### THE RUN REPORTED status: FAILED. #############################
+    # Not "noisy but usable" like the TurtleBot4's WARNING -- failed:
+    #   - 199 frames rejected vs 100 accepted (>2/3 rejection)
+    #   - height std 0.0102 m (limit 0.0050)
+    #   - tilt std 0.418 deg (limit 0.250)
+    # Reprojection RMSE 0.437 px is still sub-pixel, so the per-frame
+    # fits were fine; what failed is the AGREEMENT between frames.
+    #
+    # That is consistent with the mount rather than with a bad procedure:
+    # a marker lying flat on the floor, seen from 27 cm up by a camera
+    # tilted UP, is viewed at a very oblique angle. Oblique views make
+    # marker corners hard to localise (high rejection) and make the
+    # height/tilt solve poorly conditioned (high std). Re-running will
+    # likely reproduce it unless the geometry changes -- putting the
+    # marker further away, or tilting the camera down, would help more
+    # than more samples will.
+    # ##################################################################
+    #
+    # ### GEOMETRY CONSEQUENCE -- READ BEFORE TRUSTING ANY DISTANCE ####
+    # Camera 27.2 cm high, tilted UP 7.21 deg. Vertical half-FOV is
+    # 19.68 deg, so the BOTTOM row of the image looks only
+    # 19.68 - 7.21 = 12.47 deg below horizontal. Ray-casting that row
+    # onto the floor (_backproject_ground_plane) gives:
+    #
+    #     NEAREST VISIBLE GROUND = 1.195 m
+    #
+    # Closer than that, the ankle ray passes ABOVE the horizon and the
+    # node returns NaN (see the denom <= 1e-6 branch). Nothing on the
+    # floor inside ~1.2 m can be ranged at all in this mode.
+    #
+    # This is why `distance` below was raised from 1.0 m to 1.6 m. At
+    # 1.0 m the standoff sat INSIDE the blind zone, and the failure is
+    # worse than simply losing the target: with the legs cut off at the
+    # bottom of the frame, the ankle fallback (bbox bottom edge) also
+    # pins to the last visible row, so the reported range SATURATES near
+    # 1.19 m instead of reading smaller. The controller would see
+    # (1.19 - 1.0) > 0 forever and keep creeping forward into the
+    # person, only ever stopped by the lidar's obstacle_critical_distance.
+    #
+    # Where the ankles land at each range (image is 720 tall):
+    #     1.2 m -> row 719   (1 px of margin -- unusable)
+    #     1.4 m -> row 686   (34 px)
+    #     1.6 m -> row 662   (58 px)   <-- current standoff
+    #     2.0 m -> row 627   (93 px)
+    #     3.0 m -> row 581   (139 px)
+    #
+    # Tilt error costs range accuracy, growing with distance. Using the
+    # calibration's own reported tilt std (0.418 deg):
+    #     at 1.6 m: -4.2% / +4.6%
+    #     at 3.0 m: -7.6% / +8.9%
+    #     at 5.0 m: -12.0% / +15.8%
+    # ##################################################################
+    #
+    # UNMODELLED: the calibration also measured roll -1.735 deg, which
+    # this node's ground-plane model ignores (it assumes the camera's
+    # X/right axis is perfectly horizontal). That is 4x the TurtleBot4's
+    # 0.42 deg. Roll tilts the apparent floor, so it costs range accuracy
+    # for targets AWAY FROM IMAGE CENTER specifically -- roughly 6% at
+    # the horizontal edge of frame, in opposite directions on the two
+    # sides. See _backproject_ground_plane if that needs adding.
+    #
+    # ### STRONGLY CONSIDER position_source: "depth" INSTEAD ############
+    # Every problem above is specific to ground_plane on THIS mount: the
+    # blind zone, the forced 1.6 m standoff, the tilt sensitivity, the
+    # ignored roll, and the failed calibration itself. "depth" uses the
+    # Lite's real stereo at the hip keypoints and needs NEITHER of these
+    # two numbers, nor a marker, nor any of this geometry.
+    #
+    # ground_plane was only chosen on the TurtleBot4 because ITS depth
+    # topic ran at 1.2-1.6 Hz and bottlenecked the pipeline. That was a
+    # property of that robot, not of this camera. Measure it here before
+    # accepting any of the above:
+    #
+    #     ros2 topic hz /oak/stereo/image_raw
+    #
+    # If that is usable (>5 Hz), switch position_source to "depth" and
+    # put `distance` back to 1.0 -- the 1.6 m standoff exists only to
+    # clear the ground_plane blind zone.
+    # ##################################################################
+    camera_height: 0.272065    # m, calibrated 2026-08-25 (std 0.0102)
+    camera_pitch_deg: -7.2139  # deg, NEGATIVE = tilted UP (std 0.418)
+
+    # --- depth params (only used when position_source above is "depth") ---
+    depth_scale: 0.001
+    depth_patch_radius: 2
+    sync_slop: 0.5
+    # JPEG-compressed RGB over the robot's WiFi link instead of raw. Depth
+    # always stays raw regardless of this setting.
+    use_compressed_image: true
+
+person_tracker_node:
+  ros__parameters:
+    max_missed_frames: 15
+    association_max_distance_m: 1.0
+    association_max_pixel_distance: 150.0
+    # base_footprint, not base_link -- this rover has no base_link frame.
+    base_frame: "base_footprint"
+    process_noise: 0.05
+    measurement_noise: 0.05
+
+person_follower_node:
+  ros__parameters:
+    # Raised from 2.0 to suit the standoff above. In ground_plane mode a
+    # person is only rangeable from 1.195 m out, so the usable imprint
+    # window was 1.20-2.00 m -- and the robot now settles at 1.6 m,
+    # right at the top of it, leaving almost no room to lock onto
+    # someone before they are already at the standoff. 3.0 m gives a
+    # real window (ankles still sit 139 px above the frame bottom at
+    # 3 m). Revert to 2.0 alongside `distance` if you switch to depth.
+    imprint_max_distance: 3.0
+    # Back to 25 with the wider camera. This is only meaningful while it
+    # sits INSIDE the half-FOV: against the 19.6 deg preview it imposed
+    # no constraint at all -- anyone visible anywhere qualified, including
+    # someone half out of frame at the edge, where pose keypoints are
+    # least reliable and the ankle ray used for ranging is most likely to
+    # be clipped. Against 32.4 deg it is a real "roughly centered"
+    # requirement again, with a usable window.
+    imprint_max_angle_deg: 25.0
+    imprint_hold_time: 1.0
+    lost_timeout: 1.0
+    reacquire_timeout: 20.0
+    reacquire_positive_count: 5
+    reacquire_similarity_thresh: 0.6
+    appearance_history_size: 20
+    sync_slop: 0.1
+    use_compressed_image: true
+
+robot_controller_node:
+  ros__parameters:
+    # ==================================================================
+    # UNITS -- READ THIS BEFORE TOUCHING ANY VELOCITY BELOW
+    # ==================================================================
+    # This robot is the RoverMaster omnidirectional base, NOT the
+    # TurtleBot4 these values were originally tuned on.
+    # rover/BaseDriver.cpp takes linear.x / linear.y / angular.z as
+    # NORMALIZED THROTTLE in [-1, 1] and mixes them straight into its
+    # four wheel commands -- they are fractions of full motor authority,
+    # not m/s and rad/s. BaseDriver's k_x is 1.28, so vx = 0.3 is
+    # very roughly 0.38 m/s.
+    #
+    # Every max_* and gain_* here therefore means something completely
+    # different from what it meant on the TurtleBot4. The old max_va of
+    # 1.5 meant 1.5 rad/s; carried over unchanged it would mean 150% of
+    # full rotational authority, i.e. permanently pinned flat out. Do not
+    # port these back and forth.
+    #
+    # `distance` is the sole exception: a real distance in meters,
+    # because it is compared against the tracker's 3D position rather
+    # than sent to the base.
+    # ==================================================================
+
+    # Natural on an omni base -- backing off is just translation, no
+    # three-point turn -- so this is on here where the differential-drive
+    # config left it off.
+    enable_back: true
+
+    # ==================================================================
+    # FOLLOW STYLE -- the four params below are a PROFILE
+    # ==================================================================
+    # yaw_deadband_deg, gain_va, max_va and obstacle_frame_deadband_deg
+    # are overridden as a set by config/follow_style_<name>.yaml, chosen
+    # with the follow_style launch argument:
+    #
+    #   ros2 launch person_follower person_follower.launch.py \
+    #       follow_style:=strafe        # sideways-dominant
+    #       follow_style:=balanced      # default; the values in THIS file
+    #       follow_style:=yaw           # rotation-dominant
+    #
+    # The overlay is applied after this file, so what is written here is
+    # the `balanced` profile and also the fallback for anything that
+    # loads this config directly (tests, a bare `ros2 run`).
+    #
+    # THE YAW/STRAFE BUDGET -- why these four move together.
+    # Yaw and strafe close the SAME error. Translation is radial
+    # (_drive_toward_target scales the whole target vector), so the
+    # strafe component is gain_vy * r * sin(theta) * scale -- driven by
+    # the bearing. Yaw drives that same bearing down to the edge of
+    # yaw_deadband_deg. So wherever the deadband parks the target is what
+    # decides how much sideways motion exists to begin with:
+    #
+    #     yaw_deadband_deg IS THE STRAFE AUTHORITY KNOB.
+    #     Bigger = parks further off-center = more strafe, less FOV margin.
+    #     Smaller = better framing, less strafe.
+    #
+    # This was learned the hard way twice: 18 deg parked the target
+    # outside the preview's 32.4 deg half-FOV and lost them; 6 deg framed
+    # perfectly and removed strafing altogether. Measured in closed-loop
+    # sim against the real node (person walking laterally at 0.6 m/s,
+    # angular gain unknown so swept 1.5-4.0 rad/s per throttle unit):
+    #
+    #   profile     deadband  mean|bearing|  mean|vy|  time outside FOV
+    #   strafe         18     18.7-21.2 deg  0.110-0.124        0%
+    #   balanced       12     12.9-14.8 deg  0.075-0.086        0%
+    #   yaw             6      6.8- 8.3 deg  0.039-0.047        0%
+    #
+    # Those loss figures are all 0% only because the camera was widened
+    # on 2026-08-28 (16:9 preview, half-FOV 19.6 -> 32.4 deg; see
+    # rover_bringup/config/oakd.yaml). Against the old 19.6 deg the
+    # same three profiles lost the target 37-68%, 0-31% and 0% of the
+    # time respectively -- the FOV, not the gains, was the real problem.
+    #
+    # HARD CONSTRAINT for any new profile:
+    #   yaw_deadband_deg < obstacle_frame_deadband_deg < 32.4 (half-FOV)
+    # The first because the controller takes max() of the two, so a frame
+    # deadband at or below the plain one is inert. The second because a
+    # deadband outside the FOV means "never rotate" -- the original bug.
+    # test_controller_omni.py::test_every_follow_style_profile_fits_the_fov
+    # asserts both across every profile file.
+    # ==================================================================
+
+    # Translation ceilings. Deliberately two separate numbers rather than
+    # one speed cap: sideways is both the axis with less usable thrust
+    # out of BaseDriver's wheel mixing and the axis with the least sensor
+    # coverage (the lidar trigger cone is centered forward, the camera
+    # only looks forward), so it is worth holding strafe below forward
+    # speed. _limit_translation scales the vector as a whole to fit
+    # inside both, preserving the commanded direction.
+    max_vx: 0.35
+    max_vy: 0.30
+    # Yaw is still ONLY for keeping the target in frame (plus the
+    # REACQUIRE sweep) -- it is not how lateral error gets closed, strafe
+    # is. But "framing only" is a much bigger job on the 250x250 preview
+    # than it was on the full ISP image: see THE PREVIEW FOV COLLAPSE
+    # under yaw_deadband_deg below. Raised 0.40 -> 0.60 so the
+    # proportional term is not clipped while the target is still inside
+    # the frame; with gain_va below it saturates at 27.5 deg bearing,
+    # which is outside the preview's ~32.4 deg half-FOV, i.e. only
+    # reached on a Kalman-predicted track that has already left view.
+    max_va: 0.50
+
+    gain_vx: 0.5
+    gain_vy: 0.5
+    # Raised 0.8 -> 1.6 with the deadband drop below. Response at the
+    # edge of the preview frame (19.7 deg), which is where framing
+    # actually has to work:
+    #     old (deadband 18, gain 0.8):  va = 0.024   <- 6% of max_va
+    #     new (deadband  6, gain 1.6):  va = 0.383
+    gain_va: 1.1
+
+    # Standoff distance to hold, in METERS.
+    #
+    # RAISED FROM 1.0 because of the camera mount geometry, not for any
+    # behavioural reason: in ground_plane mode nothing on the floor
+    # inside 1.195 m can be ranged at all, and a standoff inside that
+    # blind zone makes the reported range saturate rather than fail
+    # cleanly -- the robot creeps forward indefinitely. See the long
+    # GEOMETRY CONSEQUENCE block under pose_detector_node above.
+    #
+    # 1.6 m leaves the target's ankles ~58 px above the bottom of the
+    # frame. If you switch position_source to "depth", put this back to
+    # 1.0 -- the constraint disappears entirely with it.
+    distance: 1.6
+
+    # ---- the omnidirectional change, in one parameter ----------------
+    # While the target's bearing is inside this half-angle the robot does
+    # not rotate AT ALL, and lateral error is corrected purely by
+    # strafing; past it, a proportional term turns just enough to bring
+    # them back inside. This is what "move sideways instead of turning"
+    # actually means in the controller.
+    #
+    # ### HISTORY: THE PREVIEW FOV COLLAPSE, AND THE FIX ##############
+    # Bounded above by the camera's real half-FOV. That number moved
+    # twice in three days, and both of this controller's field failures
+    # came from thresholds that were not moved with it.
+    #
+    #   full 1280x720 ISP         half-FOV 32.4 deg  (64.9 total)
+    #   250^2 preview (cropped)   half-FOV 19.6 deg  (39.2 total)
+    #   512x288 preview (16:9)    half-FOV 32.4 deg  (64.9 total)  <- now
+    #
+    # 2026-08-26 moved the pipeline onto a 250-square preview. With
+    # i_keep_preview_aspect_ratio: true that centre-crops 1280x720 to
+    # 720x720 before scaling, throwing away 44% of the image WIDTH and
+    # with it 44% of the horizontal FOV -- while yaw_deadband_deg stayed
+    # at 18 and obstacle_frame_deadband_deg at 26. An 18 deg deadband
+    # against a 19.6 deg half-FOV means the robot did not start rotating
+    # until the target was 92% of the way out of frame; 26 meant it never
+    # rotated at all while avoiding an obstacle. Reported as losing the
+    # person constantly and struggling around obstacles -- one bug.
+    #
+    # A compounding cause in the same window: the preview's camera_info
+    # reported fx=196.603 where the truth was 349.52, and bearing comes
+    # straight off fx (pose_detector_node.py, dx = (u - cx) / fx).
+    # Too-small fx EXAGGERATES bearing, so a person at the frame edge
+    # read as 32.6 deg instead of 19.8 and comfortably cleared the 18 deg
+    # deadband. Correcting fx fixed ranging and simultaneously shrank
+    # every bearing by 1.78x -- which is what made yaw go quiet.
+    #
+    # 2026-08-28 fixed the cause rather than the symptom: the preview is
+    # now 512x288, matching the ISP's 16:9, so nothing is cropped and the
+    # half-FOV is back to 32.4 deg (see the CHANGED block in
+    # rover_bringup/config/oakd.yaml). That also made the focal-length
+    # correction unnecessary -- camera_focal_scale is 1.0 again, because
+    # the driver's width-ratio scaling is correct when there is no crop.
+    #
+    # THE LESSON, since it will happen again: every threshold in this
+    # file that is an ANGLE is implicitly relative to the camera's FOV.
+    # Change the camera geometry and they must all be revisited --
+    # yaw_deadband_deg, obstacle_frame_deadband_deg, max_bearing_deg,
+    # imprint_max_angle_deg. Nothing in the code couples them.
+    # ##################################################################
+    #
+    # 0.0 gives continuous centering (always turning a little); anything
+    # above max_bearing_deg means never turning while TRACKING at all.
+    #
+    # NOTE no gain retune recovers field of view. If the target is still
+    # being lost, the real fix is width, not yaw: set
+    # i_keep_preview_aspect_ratio: false in rover_bringup/config/
+    # oakd_lite.yaml (squashed 250x250 off the full 1280x720, keeping
+    # all 64.9 deg -- but fx != fy then, so focal_length_scale, which is
+    # a single scalar applied to both, no longer expresses the
+    # correction), or point image_topic back at the full-size stream and
+    # set camera_focal_scale to 1.0.
+    # ##################################################################
+    yaw_deadband_deg: 12.0
+
+    # Past this bearing, re-framing takes priority: translation is
+    # suppressed and the robot turns in place until the target is back
+    # inside. On the differential-drive version this gated forward drive
+    # on being roughly ALIGNED; here alignment has nothing to do with
+    # being able to drive, so it is purely a "stop and re-frame" guard.
+    #
+    # Back to 45 (briefly 30, when the preview's half-FOV was only 19.6
+    # deg). It must stay OUTSIDE the half-FOV, now 32.4 deg: inside it,
+    # this would suppress translation for targets that are still
+    # perfectly visible. What trips it is person_tracker_node coasting a
+    # track on its Kalman prediction after the target has left frame --
+    # exactly the moment to stop chasing a position nobody can see and
+    # turn to look instead.
+    max_bearing_deg: 45.0
+
+    timeout: 0.5
+    watchdog_rate: 10.0
+
+    # base_footprint, NOT base_link. This rover's tf tree has no
+    # base_link node at all -- see launch/localization.py, which makes
+    # the same correction to rf2o's upstream default, and
+    # config/amcl_params.yaml.
+    base_frame: "base_footprint"
+
+    # ---- lidar minimum range -- NOT a tuning knob --------------------
+    # This rover's lidar sees its own ARM. config/scan_filter.yaml
+    # measured it: 1357 of 34914 valid beams (3.9%) return under 0.35m,
+    # clustered at 330-360deg, the farthest at 0.177m; the nearest REAL
+    # geometry ever seen was 0.35m. config/amcl_params.yaml drops that
+    # same population with laser_min_range: 0.25, scan_filter.yaml with
+    # lower_threshold: 0.25. This is the same 0.25 for the same reason,
+    # and it is needed here because this node subscribes to the RAW
+    # /scan -- the filtered /scan_rf2o exists only to feed rf2o.
+    #
+    # Without it the robot believes it is permanently boxed in: those
+    # returns sit inside both obstacle_critical_distance and
+    # obstacle_side_clearance and never change with motion (they are
+    # bolted to the robot), so they would pin forward speed at zero and
+    # refuse strafe to one side, forever, with nothing in the way.
+    scan_min_range: 0.25
+
+    # ---- sideways collision guard -- new, no TB4 equivalent ----------
+    # Strafing into a side closer than this is refused outright. The
+    # differential-drive version needed nothing like it: that robot could
+    # only translate along its own x axis, so its flanks were never a
+    # surface it could drive into and the forward cone was a complete
+    # safety story. It is not one here, where the robot strafes both to
+    # follow the person and to route around obstacles.
+    #
+    # Compared against the CLOSEST return in the side zone, not the
+    # average free_left/free_right used for direction preference -- an
+    # average stays perfectly comfortable while a single table leg sits
+    # centimeters from the wheels.
+    obstacle_side_clearance: 0.35
+
+    # Obstacle avoidance (while TRACKING): LIDAR cone checked before
+    # every drive command. This is a nudge blended on top of the normal
+    # person-following translation, not a replacement for it -- inside
+    # obstacle_distance_threshold a strafe-away term fades in and FORWARD
+    # speed scales down (both proportional to how deep into that range
+    # the obstacle is); inside obstacle_critical_distance forward motion
+    # is cut completely as a hard safety floor, while the sidestep
+    # continues. The robot should still be approaching the person the
+    # whole time, just sliding around what is in the way.
+    #
+    # The nudge lands on STRAFE (vy) here, where the differential-drive
+    # version had to spend it as rotation (va). That is not just a
+    # cosmetic port: it puts avoidance and target-framing on orthogonal
+    # axes, so they can no longer cancel each other out the way they
+    # could when both wrote to va. See robot_controller_node.py's module
+    # docstring.
+    #
+    # obstacle_forward_cone_deg (180) bounds where the two side zones can
+    # reach out to. obstacle_trigger_cone_deg (110) is the center zone
+    # deciding IF this triggers at all (min_forward/severity).
+    # obstacle_side_cone_deg (60) is the width of each side zone,
+    # measured in from the outer edge of the 180deg total -- so here:
+    # left=[+30,+90]deg, right=[-90,-30]deg. These deliberately overlap
+    # with the trigger zone -- a single LIDAR point can inform both
+    # "should I react" and "which way", no reason to keep them on fully
+    # disjoint data (see _scan_zones for why a naive non-overlapping
+    # split caused problems).
+    #
+    # Note the RPLIDAR A1 is a full 360deg scanner, so the +-90deg side
+    # zones are real measurements, not extrapolation -- which is what
+    # makes obstacle_side_clearance above trustworthy as a hard guard.
+    obstacle_forward_cone_deg: 180.0
+    obstacle_trigger_cone_deg: 110.0
+    obstacle_side_cone_deg: 60.0
+    obstacle_distance_threshold: 0.5
+    obstacle_critical_distance: 0.35
+    # Rescaled for the axis change: this used to multiply into va (rad/s
+    # on the TurtleBot4), now it multiplies into vy (normalized throttle).
+    # At full severity a floored bias of 0.35 gives ~0.21 strafe, and a
+    # saturated bias gives max_vy. Safe to push higher -- vy is clamped
+    # to max_vy regardless, so this cannot exceed the strafe limit.
+    obstacle_avoid_gain: 0.6
+    # 0.0 = nudge always towards more open space, ignoring the target;
+    # 1.0 = always towards the target's side, ignoring free space.
+    # Lowered from 0.6 on the differential-drive robot after a bagged
+    # field test (run_20260817_195751, 83-104s) showed the failure mode
+    # directly: free_left was CONSISTENTLY ~1.0-1.5m vs free_right
+    # ~0.38-0.45m (2-3x, every sample, 21 seconds straight) yet the
+    # applied direction still flipped 16 times and the robot never
+    # escaped. Root cause: base_va looked stable because
+    # obstacle_frame_deadband_deg hides small bearing swings from the
+    # CENTERING command, but frame_bias inside _read_obstacle uses the
+    # raw, un-deadbanded bearing -- so it kept swinging enough to flip
+    # the blend sign despite a free-space preference that never wavered.
+    # At bias=0.6 a frame_bias swing to just -0.4 already flips the sign
+    # against a free_bias of +0.55; at bias=0.2 even a fully-saturated
+    # frame_bias=-1 still nets positive.
+    #
+    # Kept at 0.2 here. The oscillation it was fixing is inherently
+    # milder on this base (a strafe moves the camera off the target far
+    # less than a turn did, so frame_bias is fed a quieter signal), but
+    # the blend logic itself is unchanged and there is no reason to
+    # re-introduce a known-bad value.
+    obstacle_avoid_frame_bias: 0.2
+    # Ceiling the weight above rises towards as the target's bearing
+    # approaches obstacle_frame_deadband_deg -- as they get closer to
+    # actually being at risk of leaving frame, free space matters less
+    # and keeping them in view matters more. Fixes a second bagged
+    # failure (run_20260817_200939, ~20-22s and ~27.5-28.8s) where a low
+    # fixed weight let avoidance commit hard AWAY from a target already
+    # near the frame edge, losing them within about a second.
+    obstacle_frame_bias_max: 1.0
+    # Free-space/bearing inputs are squashed through tanh(value/scale)
+    # into a continuous [-1,1] contribution before blending. Smaller
+    # scale = more sensitive to small differences/angles.
+    obstacle_free_space_scale_m: 1.0
+    obstacle_frame_angle_scale_deg: 30.0
+    # Low-pass filter on the final blended bias -- each new reading only
+    # pulls the output this fraction of the way towards itself. This, not
+    # a discrete decision defended with hysteresis/hold-time/debounce, is
+    # what actually stops oscillation near an obstacle: a discrete +1/-1
+    # version (tried first) kept flipping every ~1s regardless of how
+    # much hysteresis got piled on, because hysteresis only slows a
+    # bang-bang controller down, it does not stop it flipping when the
+    # signal sits near the decision boundary for an extended time.
+    obstacle_steer_smoothing: 0.3
+    # Once severity reaches obstacle_min_steer_severity, the applied bias
+    # is floored to at least this magnitude, using whichever direction
+    # the (possibly tiny) blended signal already leans. Stops the robot
+    # braking in place in front of a near-symmetric obstacle instead of
+    # actually moving around it.
+    obstacle_min_steer_bias: 0.35
+    obstacle_min_steer_severity: 0.3
+    # The floor's direction comes from the last CONFIDENTLY non-zero
+    # blended sign, not this frame's own -- a near-symmetric reading's
+    # true sign is mostly scan noise, and trusting it directly would make
+    # the floor itself flip sides on noise.
+    obstacle_sign_confidence: 0.1
+    # While avoiding, how far off-center (degrees) the target may drift
+    # before the framing turn starts correcting -- "keep them in frame",
+    # not "keep them dead center".
+    #
+    # This mattered enormously on the differential-drive base, where it
+    # was the only thing stopping centering from cancelling the avoidance
+    # turn outright (both wrote to va). Here avoidance writes to vy, so
+    # the two no longer compete and this is doing a much smaller job: it
+    # just relaxes framing slightly while maneuvering. It is also now a
+    # FLOOR-and-ceiling pair with yaw_deadband_deg -- the controller
+    # takes max(yaw_deadband, this * severity), so the normal deadband
+    # always applies and this only ever widens it.
+    #
+    # ### THIS WAS LARGER THAN THE ENTIRE HALF-FOV ####################
+    # It is a max() against yaw_deadband_deg, so at full obstacle
+    # severity the effective deadband became 26 deg -- against a preview
+    # half-FOV of 19.6 deg (see yaw_deadband_deg). Framing was not
+    # "relaxed" while avoiding, it was switched OFF: the target could
+    # walk clean out of the frame without the robot ever rotating. That
+    # is both halves of the reported symptom at once, and it explains
+    # why losing the target and struggling around obstacles happened
+    # together -- they were the same bug.
+    #
+    # 12 deg keeps the intended meaning (looser framing while
+    # maneuvering) while staying well inside the FOV: at full severity
+    # the band runs 12 -> 19.6 deg, so framing always has room left to
+    # act before the target is gone.
+    # ##################################################################
+    obstacle_frame_deadband_deg: 15.0
+
+    # Search-by-rotating (while REACQUIRE only -- initial SEARCH just
+    # waits still for someone to imprint): rotate in short bursts,
+    # pausing between each, biased towards wherever the target was last
+    # seen. The pause needs to comfortably cover reacquire_positive_count
+    # frames at the camera's frame rate so re-id gets a stable window to
+    # lock back on -- continuous rotation never gives it one.
+    #
+    # Deliberately still ROTATION, not strafe, even on this base: the job
+    # is to sweep the camera over ground it cannot currently see, and
+    # strafing mostly just slides the same view sideways.
+    #
+    # NOTE this is normalized throttle now, not rad/s -- 0.3 is 30% of
+    # full rotational authority. Worth watching on the first run: if the
+    # bursts sweep too fast for YOLO to get clean frames, lower it rather
+    # than lengthening the pause.
+    search_angular_speed: 0.3
+    search_rotate_burst_duration: 0.6
+    search_pause_duration: 2.0
+    search_rate: 10.0
+
+# Only used when use_goal_publisher:=true (see launch/person_follower.launch.py) --
+# alternative to robot_controller_node for a separate obstacle-avoiding
+# local planner instead of driving /cmd_vel directly.
+goal_publisher_node:
+  ros__parameters:
+    distance: 1.6    # meters, must match robot_controller_node's above
+    frame_id: "base_footprint"
+
+visualization_node:
+  ros__parameters:
+    # Must match person_tracker_node's base_frame above -- an unknown
+    # frame_id makes RViz silently drop every marker.
+    base_frame: "base_footprint"
+    sync_slop: 0.1
+    marker_lifetime: 0.5
+    use_compressed_image: true

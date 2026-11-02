@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>person_follower_msgs</name>
+  <version>0.0.1</version>
+  <description>
+    Messages and services for the person_follower package: a ROS2 port of
+    the person-detection/tracking/following pipeline shape used by
+    koide3/monocular_person_following, adapted for YOLO-Pose + OAK-D depth.
+  </description>
+  <maintainer email="vaishnavr27@gmail.com">robopi</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

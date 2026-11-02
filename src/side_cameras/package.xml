@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>side_cameras</name>
+  <version>0.0.1</version>
+  <description>
+    Left and right BlueRobotics USB camera bringup for the Jetson. One
+    node instance per camera, each publishing its stream as both a raw
+    sensor_msgs/Image and a JPEG sensor_msgs/CompressedImage, following
+    the rover's existing /capture/camera_*/img topic contract.
+  </description>
+  <maintainer email="vaishnavr27@gmail.com">robopi</maintainer>
+  <license>BSD</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

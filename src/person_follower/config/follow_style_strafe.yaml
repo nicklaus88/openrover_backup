@@ -1,0 +1,32 @@
+# follow_style: strafe -- sideways-dominant.
+#
+# Overlay for robot_controller_node, selected with
+#   ros2 launch person_follower person_follower.launch.py follow_style:=strafe
+# It is applied AFTER person_follower.yaml, so it only needs the params
+# that differ. Everything else comes from the base config.
+#
+# The widest yaw deadband here. Lateral error is left to strafe as far
+# as possible; yaw only rescues framing at the last moment.
+#
+# 18 deg is the pre-2026-08-28 value, restored. It was never wrong as a
+# BEHAVIOR -- it was wrong against a 19.6 deg half-FOV, where it parked
+# the target outside the frame and lost them 37-68% of the time. With
+# the 16:9 preview (oakd_lite.yaml, half-FOV back to 32.4 deg) it parks
+# them at ~19-21 deg with ~11 deg of margin to spare.
+#
+# Sim, person walking laterally at 0.6 m/s, angular gain swept 1.5-4.0:
+#   mean|bearing| 18.7-21.2 deg   mean|vy| 0.110-0.124   out of FOV 0%
+#
+# Most sideways motion of the three profiles. Still the first one to
+# suffer if the FOV is ever narrowed again.
+robot_controller_node:
+  ros__parameters:
+    follow_style: "strafe"
+    yaw_deadband_deg: 18.0
+    gain_va: 0.8
+    max_va: 0.45
+    # Must stay above yaw_deadband_deg (the controller takes max() of
+    # the two) and below the 32.4 deg half-FOV. 24 leaves ~8 deg of
+    # margin while avoiding -- the thinnest in this package, which is
+    # the point of this profile.
+    obstacle_frame_deadband_deg: 24.0

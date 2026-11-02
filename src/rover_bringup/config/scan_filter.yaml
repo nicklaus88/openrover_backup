@@ -1,0 +1,46 @@
+# Range filter for the scan that feeds rf2o_laser_odometry.
+#
+# WHY THIS EXISTS
+# ---------------
+# This robot's lidar sees its own ARM. Measured live off /scan over 40
+# scans: 1357 of 34914 valid beams (3.9%) return under 0.35 m, the
+# farthest of them at 0.177 m, clustered at 330-360 deg. amcl_params.yaml
+# documents the same population and disposes of it with
+# laser_min_range: 0.25 -- nav2_amcl turns anything at or below that into
+# a max-range reading, which the likelihood field ignores.
+#
+# rf2o has no equivalent. Its only validity test is
+# `std::isfinite(r) && r > 0` (CLaserOdometry2D.cpp:319,343), so a solid
+# 0.177 m return is accepted as real world geometry. That is actively
+# harmful to a scan matcher in a way it is not to a particle filter:
+# those beams are bolted to the sensor, so their range NEVER changes no
+# matter how the robot moves. RF2O solves for the (vx, vy, omega) that
+# best explains the range flow between consecutive scans, and ~34
+# zero-flow beams per scan pull that solution toward "no motion".
+# Short-range beams carry disproportionate weight in that solve, so the
+# result is odometry that systematically under-reports travel -- which
+# looks exactly like the open-loop wheel odometry drift rf2o was brought
+# in to replace.
+#
+# Replacing them with +inf (rather than 0) is deliberate: rf2o's own
+# check rejects non-finite values, so inf reads as "no return here",
+# which is the truth.
+#
+# The 0.25 lower bound matches amcl_params.yaml's laser_min_range and
+# clears the arm with margin -- the highest arm return measured was
+# 0.177 m and the nearest real geometry seen was 0.35 m.
+
+rf2o_scan_filter:
+  ros__parameters:
+    filter1:
+      name: arm_returns
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        # false = use the thresholds below, not the driver's own
+        # range_min/range_max from the message (the A1 reports 0.15,
+        # which would let every arm return through).
+        use_message_range_limits: false
+        lower_threshold: 0.25
+        upper_threshold: 12.0
+        lower_replacement_value: .inf
+        upper_replacement_value: .inf

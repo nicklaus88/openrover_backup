@@ -1,0 +1,25 @@
+# follow_style: yaw -- rotation-dominant, differential-drive-like.
+#
+# Overlay for robot_controller_node, selected with
+#   ros2 launch person_follower person_follower.launch.py follow_style:=yaw
+# It is applied AFTER person_follower.yaml, so it only needs the params
+# that differ. Everything else comes from the base config.
+#
+# Turns to face the target and drives at them, the way the original
+# TurtleBot4 version did. Because translation is radial, a nulled bearing
+# leaves almost nothing for strafe to do, so the rover barely moves
+# sideways at all except when dodging an obstacle. This was tried as the
+# global tuning on 2026-08-28 and rejected for normal following ("not
+# going sideways at all") -- it is kept as a profile because it is the
+# most robust at keeping a person in frame, and because a training set
+# wants both behaviors.
+#
+# Sim, person walking laterally at 0.6 m/s, angular gain swept 1.5-4.0:
+#   mean|bearing| 6.8-8.3 deg   mean|vy| 0.039-0.047   out of FOV 0%
+robot_controller_node:
+  ros__parameters:
+    follow_style: "yaw"
+    yaw_deadband_deg: 6.0
+    gain_va: 1.6
+    max_va: 0.60
+    obstacle_frame_deadband_deg: 12.0

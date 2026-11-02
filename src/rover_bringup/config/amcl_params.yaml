@@ -1,0 +1,190 @@
+# AMCL localization against a pre-built .pgm/.yaml map.
+#
+# Used by launch/localization.py. This is the counterpart to
+# mapper_params_online_async.yaml: that one BUILDS a map with
+# slam_toolbox, this one LOCALIZES in one that already exists.
+#
+# Why AMCL and not slam_toolbox's own localization mode: slam_toolbox
+# can only localize against a serialized posegraph (.posegraph + .data
+# from its /slam_toolbox/serialize_map service). The maps in
+# ros2_ws/maps/ are map_saver output -- .pgm images plus a .yaml -- and a
+# posegraph cannot be recovered from a rendered image. AMCL consumes the
+# .pgm/.yaml directly, so the existing lab maps work untouched.
+
+amcl:
+  ros__parameters:
+
+    # Must match the frames the rest of the stack already uses:
+    # rover/base publishes odom -> base_footprint (BaseDriver.cpp:238),
+    # and lidar_toolbox/odom_tf_broadcaster turns that message into TF.
+    global_frame_id: map
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+    scan_topic: /scan
+
+    # OMNI, not the nav2 default of differential. This rover is an
+    # omnidirectional base: BaseDriver::motion() takes (vx, vy, vr) and
+    # mixes them across four wheels, and integrate_odometry() advances
+    # BOTH x and y. A DifferentialMotionModel assumes the robot can only
+    # drive along its heading, so every strafe would be fed to the
+    # particle filter as un-modelled noise and the pose would slip.
+    robot_model_type: "nav2_amcl::OmniMotionModel"
+
+    # Odometry noise, TUNED FOR RF2O (launch/localization.py's default
+    # odom_source). These values describe the odom -> base_footprint
+    # transform AMCL is handed, so they have to describe whichever node
+    # is publishing it -- and the two candidates fail in opposite ways.
+    #
+    # The previous values (0.2 / 0.2 / 0.5 / 0.2 / 0.3) were fitted to
+    # lidar_toolbox/odom_tf_broadcaster, i.e. the rover's own odometry.
+    # That one is open-loop: BaseDriver.cpp:47 derives linear velocity
+    # from the *commanded* velocity times odom_k_x/odom_k_y, no encoder
+    # ever confirming it and heading from the IMU. Hence the asymmetry --
+    # rotation comparatively trustworthy, translation the term that lies,
+    # so alpha3 was pushed to 0.5 to let the particle cloud spread along
+    # travel and let scan matching pick the right pose back out.
+    #
+    # RF2O inverts that. It measures translation and rotation from the
+    # scans themselves, so translation is no longer the weak term and a
+    # 0.5 alpha3 now costs real accuracy: it inflates the motion prior
+    # every update, which is what makes the cloud stay fat and the pose
+    # wander even while odometry is good.
+    #
+    # Not tightened further than this on purpose. RF2O's failure mode is
+    # slipping ALONG a featureless corridor, where consecutive scans look
+    # identical -- and RoboPI_DryLab_corridor is the default map. alpha3
+    # at 0.15 still leaves the filter room to correct such a slip;
+    # anything near 0.05 would tell AMCL to believe the slip instead.
+    #
+    # If you switch back with odom_source:=rover, restore the old values
+    # above -- these are too tight for commanded-velocity odometry.
+    #
+    # THIRD SET, for odom_source:=fused -- NOW ACTIVE (below), since fused
+    # is localization.py's default and was validated on the robot
+    # 2026-09-24 with scripts/odom_diagnose.py: forward and strafe gains
+    # agree with rf2o (slope 0.97 / 1.0), gyro agrees (0.91), heading
+    # within ~4 deg of rf2o through a full loop, and the fused odometry
+    # closed a hand-driven loop to 5.7 cm (rf2o alone: 13 cm).
+    #
+    # Original reasoning, for odom_source:=fused (config/ekf_fused_odom.yaml):
+    # Fusion is strictly better than either input alone: the EKF has rf2o's
+    # measured translation AND a velocity source that never degenerates, so
+    # it does not inherit either one's worst case wholesale. Tighten from
+    # the rf2o row, mostly on translation:
+    #
+    #     alpha1: 0.08   alpha2: 0.08   alpha3: 0.10
+    #     alpha4: 0.08   alpha5: 0.10
+    #
+    # Do NOT push alpha3 toward 0.05 while RoboPI_DryLab_corridor is the
+    # default map. The corridor is where rf2o slips along its own axis, and
+    # although commanded velocity now fights that slip, it fights it with a
+    # gain (BaseDriver's k_x) calibrated at one throttle rather than
+    # measured live. Leave the filter room to disagree with both of them.
+    #
+    # On odom_source:=rf2o, go back to the rf2o set: 0.1 / 0.1 / 0.15 /
+    # 0.1 / 0.15. On odom_source:=rover, the looser set above.
+    alpha1: 0.08  # rotation noise from rotation       (fused set)
+    alpha2: 0.08  # rotation noise from translation
+    alpha3: 0.10  # translation noise from translation
+    alpha4: 0.08  # translation noise from rotation
+    alpha5: 0.10  # strafe noise (omni model only)
+
+    # 0.25, NOT the 0.1 that mapper_params_online_async.yaml uses.
+    #
+    # This robot's lidar sees its own ARM. Measured live off /scan over 40
+    # scans: 1557 of 35702 beams (4.4%) return under 0.35 m, and the
+    # farthest of them is 0.178 m -- 1136 of those sit in a tight
+    # 331-344 deg cluster. lidar_toolbox/scan_transformer.py exists partly
+    # to delete exactly these (its filter_obstacles() drops sub-0.2 m
+    # returns between 120 and 240 deg of the ROTATED scan, which is the
+    # same beams), and the maps in ros2_ws/maps were built through it.
+    #
+    # AMCL is fed raw /scan, so without this every single scan handed the
+    # filter a solid obstacle 18 cm from the robot that does not exist
+    # anywhere in the map. nav2_amcl converts any range <= laser_min_range
+    # into a max-range reading, which the likelihood field then ignores,
+    # so 0.25 discards all of them with margin and keeps everything real.
+    laser_min_range: 0.25
+    laser_max_range: 12.0
+
+    # 180, not nav2's default 60. The A1 delivers 1080 beams per scan;
+    # subsampling to 60 throws away 94% of the evidence, which makes the
+    # likelihood peak broad and is a direct cause of both slow initial
+    # convergence and a pose that wanders. 180 sharpens it substantially
+    # and the Orin has the headroom.
+    max_beams: 180
+
+    # Particle count. 2000 is the nav2 default ceiling; the A1 at 8 kHz
+    # gives plenty of beams to converge with, and the Orin has headroom.
+    min_particles: 500
+    max_particles: 2000
+
+    # Likelihood field is the right model for a 360 lidar in a mapped
+    # indoor space -- cheaper than beam and far less sensitive to
+    # unmapped clutter (people, chairs) than the beam model.
+    laser_model_type: "likelihood_field"
+
+    # z_hit/z_rand are the big convergence knob. Nav2 ships 0.5/0.5, which
+    # says "half of every reading is uniform random noise" -- a very flat,
+    # forgiving likelihood that refuses to commit to a pose. That is the
+    # right default for an unknown sensor, but the A1 in a mapped indoor
+    # lab is far better than that, and the flat field shows up exactly as
+    # the reported symptom: slow to lock on, then drifting off. 0.85/0.15
+    # gives a decisive peak while still tolerating unmapped clutter
+    # (people, chairs, an open door).
+    sigma_hit: 0.1
+    z_hit: 0.85
+    z_rand: 0.15
+    z_max: 0.05
+    z_short: 0.05
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+
+    # How far the robot must move before the filter corrects itself.
+    # Between updates the pose is pure dead reckoning off whatever
+    # odom -> base_footprint says, so this interval IS the drift budget.
+    # Kept at 0.10 m even though rf2o drifts far less than the wheel
+    # odometry did: the cost is CPU, the Orin has it, and the tighter
+    # budget is what keeps odom_source:=rover usable as a fallback
+    # without editing this file.
+    update_min_d: 0.10
+    update_min_a: 0.10
+    resample_interval: 1
+
+    # KLD sampling bounds.
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_slow: 0.001
+    recovery_alpha_fast: 0.1
+
+    # Publish map -> odom at 20 Hz, matching slam_toolbox's
+    # transform_publish_period of 0.02 in the mapping config.
+    transform_tolerance: 1.0
+    save_pose_rate: 0.5
+    tf_broadcast: true
+    always_reset_initial_pose: false
+
+    # OBSERVED HAZARD, not hypothetical: with first_map_only false, AMCL
+    # accepts /map from ANY publisher on the DDS domain, not just the
+    # map_server started alongside it. During bring-up a slam_toolbox
+    # instance left running on this same domain published its own
+    # in-progress 177x95 map and AMCL logged "Received a 177 X 95 map"
+    # right before the real 508x232 one -- i.e. localization would have
+    # been running against whichever arrived last.
+    #
+    # Do not run this launch file and slam_toolbox at the same time:
+    # besides the map, both broadcast map -> odom and the TF tree ends up
+    # with two writers fighting over it. Stop slam_toolbox first.
+    #
+    # Left at false (the nav2 default) on purpose: flipping it to true
+    # locks in the FIRST map seen, which is worse if the foreign one wins
+    # the race. The fix is one map publisher, not a flag.
+    first_map_only: false
+
+map_server:
+  ros__parameters:
+    # yaml_filename is NOT set here on purpose -- launch/localization.py
+    # passes it as an override so the map can be switched with
+    # `map:=<name>` without editing this file.
+    topic_name: map
+    frame_id: map
