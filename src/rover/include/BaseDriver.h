@@ -64,5 +64,6 @@ public:
   BaseDriver();
   ~BaseDriver();
   // Handle packets sent from serial device
-  void communicate();
+  // Handles one queued MSP packet; returns false when the queue is empty.
+  bool communicate();
 };

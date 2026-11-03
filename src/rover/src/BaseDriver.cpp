@@ -372,16 +372,16 @@ BaseDriver::~BaseDriver() {
   // RCLCPP_INFO(get_logger(), "Exiting ...");
 }
 
-void BaseDriver::communicate() {
+bool BaseDriver::communicate() {
   const auto raw_packet = device->read();
   if (raw_packet == nullptr)
-    return;
+    return false;
   try {
     if (raw_packet->is<MSP::RAW_IMU>())
-      return update(raw_packet->as<MSP::RAW_IMU>(), raw_packet->timestamp);
-    if (raw_packet->is<MSP::ATTITUDE>())
-      return update(raw_packet->as<MSP::ATTITUDE>(), raw_packet->timestamp);
-    if (raw_packet->is<MSP::ANALOG>()) {
+      update(raw_packet->as<MSP::RAW_IMU>(), raw_packet->timestamp);
+    else if (raw_packet->is<MSP::ATTITUDE>())
+      update(raw_packet->as<MSP::ATTITUDE>(), raw_packet->timestamp);
+    else if (raw_packet->is<MSP::ANALOG>()) {
       const auto &msg = raw_packet->as<MSP::ANALOG>();
       double volt = static_cast<double>(msg.vbat) * 0.01;
       RCLCPP_INFO(get_logger(), "Battery voltage: %.2f V", volt);
@@ -389,4 +389,5 @@ void BaseDriver::communicate() {
   } catch (const std::exception &e) {
     RCLCPP_ERROR(get_logger(), "MSP Error: %s", e.what());
   }
+  return true;
 }

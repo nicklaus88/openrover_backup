@@ -4,6 +4,7 @@
 #include "serial/serial.h"
 
 #include <iostream>
+#include <poll.h>
 #include <sys/types.h>
 
 using namespace std::chrono_literals;
@@ -76,6 +77,28 @@ void Device::receiver() {
   uint8_t recv_buffer[256];
   uint8_t *ptr;
   while (!flag_term) {
+    // The port is non-blocking (VMIN=0, VTIME=0), so a bare read() returns 0
+    // at once when nothing is waiting and this loop would spin a full core.
+    // Sleep in poll() until bytes arrive; the timeout bounds how long
+    // flag_term can go unchecked, so the destructor's join() stays prompt.
+    struct pollfd pfd = {fd, POLLIN, 0};
+    const int ready = ::poll(&pfd, 1, 100 /* ms */);
+    if (ready < 0) {
+      if (errno == EINTR)
+        continue;
+      std::cerr << "MultiWii: poll failed: " << strerror(errno)
+                << ", aborting ..." << std::endl;
+      break;
+    }
+    if (ready == 0)
+      continue; // timeout, re-check flag_term
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+      // Device gone (e.g. USB unplugged): poll() would now return at once
+      // forever, so stop here like a failed read() does.
+      std::cerr << "MultiWii: device error or hang-up, aborting ..."
+                << std::endl;
+      break;
+    }
     const auto ret = ::read(fd, recv_buffer, sizeof(recv_buffer));
     if (ret < 0) {
       std::cerr << "MultiWii: failed to read from device: " << strerror(errno)
